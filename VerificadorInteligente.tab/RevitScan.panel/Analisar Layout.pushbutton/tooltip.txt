@@ -1,0 +1,24 @@
+Executa um diagnóstico completo do modelo Revit ativo.
+
+Gera:
+• categorias.csv
+• model_fingerprint.json
+
+Inclui:
+• Informações do projeto (cliente, endereço, autor)
+• Versão do Revit em uso
+• Níveis e pavimentos com elevação em metros
+• Worksets (modelos colaborativos)
+• Alertas e inconsistências do modelo
+• Modelos RVT linkados e seus status
+• Fases do projeto
+• Opções de projeto (Design Options)
+• Ranking das top 20 categorias de elementos
+
+Objetivo:
+Mapear o estado atual do modelo Revit e gerar um
+fingerprint comparável entre versões ao longo do tempo.
+
+Recomendação:
+Executar periodicamente para monitorar alterações
+estruturais no modelo e apoiar auditorias BIM.
