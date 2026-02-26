@@ -1,0 +1,19 @@
+Extrai todos os elementos do modelo BIM e seus parâmetros.
+
+Gera:
+- elements.csv (cadastro base de elementos)
+- params.csv (parâmetros em formato EAV)
+
+Inclui:
+• Categoria, Família, Tipo
+• Nível e localização
+• Bounding Box
+• Parâmetros de instância e tipo
+
+Objetivo:
+Transformar o modelo Revit em dataset estruturado para
+Data Lake, Analytics e cruzamento com orçamento (LPU).
+
+Observações:
+• Pode gerar arquivos grandes em modelos MEP.
+• Salva em pasta organizada por modelo e data.

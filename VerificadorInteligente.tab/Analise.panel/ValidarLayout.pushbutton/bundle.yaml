@@ -1,0 +1,13 @@
+title: Validar Layout
+author: Emerson Rafael
+tooltip: |
+  Executa validações de consistência do layout (rule-based).
+
+  Resultado:
+  • Exibe APROVADO ou NÃO APROVADO
+  • Lista os critérios que falharam
+
+  Valida:
+  • Presença de folhas por disciplina (EL/INF/SEG)
+  • Quantidade mínima de elementos por categoria
+  • Inconsistências básicas (folhas sem elementos)

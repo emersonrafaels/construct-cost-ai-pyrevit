@@ -1,0 +1,17 @@
+Extrai a estrutura documental do projeto.
+
+Gera:
+- sheets_views.csv
+
+Inclui:
+• Número e nome da folha
+• Vistas contidas na folha
+• Tipo de vista
+• Disciplina associada
+
+Objetivo:
+Mapear a organização das pranchas do projeto e permitir
+classificação de disciplinas (Elétrica, Infra, Segurança).
+
+Uso recomendado:
+Executar antes do DumpModel para apoiar inferência de disciplina.

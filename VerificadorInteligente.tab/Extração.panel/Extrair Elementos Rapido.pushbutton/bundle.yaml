@@ -1,0 +1,11 @@
+title: Extrair Elementos (Rápido)
+author: Emerson Rafael
+tooltip: |
+  Exportação otimizada para análise rápida (MEP/Infra/Segurança).
+
+  Saídas:
+  • elements_*.csv
+  • params_top_*.csv
+
+  Inclui apenas categorias relevantes e parâmetros-chave.
+  Recomendado para execução em lote por agência.

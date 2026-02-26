@@ -1,0 +1,11 @@
+title: Extrair Elementos (Completo)
+author: Emerson Rafael
+tooltip: |
+  Exportação completa do modelo BIM (todas as categorias e parâmetros).
+
+  Saídas:
+  • elements_*.csv
+  • params_*.csv
+
+  Observação:
+  Pode gerar arquivos grandes em modelos MEP.

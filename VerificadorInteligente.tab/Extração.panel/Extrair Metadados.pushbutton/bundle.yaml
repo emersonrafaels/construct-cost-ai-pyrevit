@@ -1,0 +1,22 @@
+title: Extrair Metadados
+author: Emerson Rafael
+tooltip: |
+  Extrai a estrutura documental do projeto Revit.
+
+  Gera:
+  • sheets_views.csv
+
+  Inclui:
+  • Número e nome da folha
+  • Vistas contidas na folha
+  • Tipo de vista (FloorPlan, Section, 3D, etc.)
+  • Disciplina associada
+
+  Objetivo:
+  Mapear a organização das pranchas do projeto
+  e permitir classificação por disciplina
+  (Elétrica, Infraestrutura, Segurança).
+
+  Recomendação:
+  Executar antes do Dump Model para apoiar
+  análises de inferência e governança BIM.

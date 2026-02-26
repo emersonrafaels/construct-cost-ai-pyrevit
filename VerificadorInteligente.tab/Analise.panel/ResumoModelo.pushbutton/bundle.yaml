@@ -1,0 +1,17 @@
+title: Resumo do Modelo
+author: Emerson Rafael
+tooltip: |
+  Gera um resumo rápido do modelo BIM para pré-validação.
+
+  Saídas:
+  • model_profile.json
+  • top_categorias.csv
+  • folhas_resumo.csv
+
+  Inclui:
+  • Total de elementos e categorias
+  • Top categorias por volume
+  • Total de folhas e distribuição por palavras-chave (EL/INF/SEG)
+
+  Recomendação:
+  Execute antes de “Extrair Elementos” para entender tamanho e disciplina.
