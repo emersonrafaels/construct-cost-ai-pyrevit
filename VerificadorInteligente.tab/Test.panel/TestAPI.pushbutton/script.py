@@ -32,7 +32,7 @@ from Autodesk.Revit.DB import (
     RevitLinkInstance,              # Modelos RVT linkados (novo)
     DesignOption,                   # Opcoes de projeto (novo)
     UnitUtils,                      # Conversao de unidades internas do Revit (novo)
-    DisplayUnitType,                # Enum de unidades de exibicao (novo)
+    UnitTypeId,                     # Identificadores de tipo de unidade (Revit 2022+)
 )
 from collections import Counter, OrderedDict
 import csv, os, datetime, json
@@ -86,18 +86,28 @@ out_fp_lat      = os.path.join(LATEST_DIR, "model_fingerprint.json")
 # ============================================================
 
 def u8(x):
-    """Converte para bytes UTF-8 — necessario no IronPython 2."""
-    try:
-        if x is None:
-            return ""
-        if isinstance(x, unicode):
-            return x.encode("utf-8")
-        return str(x)
-    except:
+    """
+    Garante que o valor seja uma string unicode pura.
+    Em IronPython 2, strings da API do Revit podem chegar como bytes (str)
+    com encoding UTF-8 ou Latin-1. Retornar unicode evita mojibake no painel
+    HTML do pyRevit (ex: 'LuminÃ¡rias' -> 'Luminárias').
+    """
+    if x is None:
+        return u""
+    if isinstance(x, unicode):
+        return x
+    if isinstance(x, (str, bytes)):
         try:
-            return unicode(x).encode("utf-8")
-        except:
-            return ""
+            return x.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            try:
+                return x.decode("latin-1")
+            except (UnicodeDecodeError, AttributeError):
+                return u""
+    try:
+        return unicode(x)
+    except:
+        return u""
 
 
 def write_bom_csv(path):
@@ -108,8 +118,22 @@ def write_bom_csv(path):
 
 
 def safe_str(x):
-    """Retorna string ou '' se None."""
-    return x if x else ""
+    """Retorna unicode string ou '' se None.
+    Em IronPython, strings da API do Revit podem chegar como bytes (str),
+    causando UnicodeDecodeError no json.dumps. Esta funcao garante unicode.
+    """
+    if not x:
+        return u""
+    if isinstance(x, unicode):
+        return x
+    # byte string: tenta decodificar como utf-8, depois latin-1
+    try:
+        return x.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        try:
+            return x.decode("latin-1")
+        except (UnicodeDecodeError, AttributeError):
+            return unicode(x)
 
 
 def to_meters(internal_value):
@@ -122,7 +146,7 @@ def to_meters(internal_value):
     try:
         return round(
             UnitUtils.ConvertFromInternalUnits(
-                internal_value, DisplayUnitType.DUT_METERS
+                internal_value, UnitTypeId.Meters
             ), 3
         )
     except:
@@ -383,7 +407,9 @@ w.writerow(HEADER)
 w_lat.writerow(HEADER)
 
 for cat, qty in counter.most_common():
-    row = [u8(run_stamp), u8(model), u8(cat), str(qty)]
+    # Codifica para UTF-8 bytes pois o CSV e aberto em modo binario
+    row = [u8(run_stamp).encode("utf-8"), u8(model).encode("utf-8"),
+           u8(cat).encode("utf-8"), str(qty)]
     w.writerow(row)
     w_lat.writerow(row)
 
@@ -397,22 +423,46 @@ f_lat.close()
 # O "fingerprint" registra o estado do modelo num dado momento.
 # Salvar fingerprints sequenciais permite detectar alteracoes entre versoes.
 
+def normalize_for_json(obj):
+    """
+    Percorre recursivamente um objeto e garante que todas as strings
+    sejam unicode puro — necessario para contornar bug do json do IronPython 2.7
+    que nao consegue serializar byte strings com chars nao-ASCII.
+    """
+    if isinstance(obj, dict):
+        return {normalize_for_json(k): normalize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [normalize_for_json(v) for v in obj]
+    elif isinstance(obj, unicode):
+        return obj  # ja e unicode, sem tratamento adicional
+    elif isinstance(obj, (str, bytes)):
+        try:
+            return obj.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            try:
+                return obj.decode("latin-1")
+            except (UnicodeDecodeError, AttributeError):
+                return u""
+    else:
+        return obj
+
+
 def safe_phases_list(phases_obj):
     result = []
     try:
         for ph in phases_obj:
-            result.append(ph.Name)
+            result.append(safe_str(ph.Name))
     except:
         pass
     return result
 
 fingerprint = {
     "run_stamp":   run_stamp,
-    "model":       model,
+    "model":       safe_str(model),
     "revit_version": {
-        "number": str(app.VersionNumber),
-        "name":   str(app.VersionName),
-        "build":  str(app.VersionBuild),
+        "number": safe_str(str(app.VersionNumber)),
+        "name":   safe_str(str(app.VersionName)),
+        "build":  safe_str(str(app.VersionBuild)),
     },
     "project_info": {
         "name":    safe_str(proj.Name),
@@ -434,19 +484,29 @@ fingerprint = {
         "worksets_count":         len(worksets_info),
     },
     "levels": [
-        {"name": lv.Name, "elevation_m": to_meters(lv.Elevation)}
+        {"name": safe_str(lv.Name), "elevation_m": to_meters(lv.Elevation)}
         for lv in levels
     ],
     "phases": safe_phases_list(phases),
     "top_categories": [
-        {"category": cat, "count": qty}
+        {"category": safe_str(cat), "count": qty}
         for cat, qty in counter.most_common(TOP_N_CATS)
     ],
 }
 
 for path in [out_fingerprint, out_fp_lat]:
-    with open(path, "w") as jf:
-        jf.write(json.dumps(fingerprint, indent=2))
+    try:
+        # Normaliza todo o dict para unicode puro antes de serializar.
+        # Contorna bug do json do IronPython 2.7 com byte strings nao-ASCII.
+        safe_fp = normalize_for_json(fingerprint)
+        json_bytes = json.dumps(safe_fp, indent=2, ensure_ascii=True)
+        if isinstance(json_bytes, unicode):
+            json_bytes = json_bytes.encode("utf-8")
+        with open(path, "wb") as jf:
+            jf.write(json_bytes)
+    except Exception as ex_json:
+        with open(path, "wb") as jf:
+            jf.write(u"{{\"error\": \"{}\"}}".format(str(ex_json)).encode("utf-8"))
 
 
 # ============================================================
