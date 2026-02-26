@@ -711,3 +711,4 @@ for cat_name, cat_data in sorted(hierarchy.items(), key=lambda x: -x[1]["total"]
     print("  {:>5}  {}  ({} familias, {} tipos)".format(
         cat_data["total"], cat_name, n_fams, n_types))
 print("=" * 55)
+print("PROCESSO REALIZADO COM SUCESSO")
