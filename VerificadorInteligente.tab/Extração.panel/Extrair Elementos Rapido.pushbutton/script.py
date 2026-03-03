@@ -1,135 +1,89 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 # ============================================================
-# CONTEXTO RAPIDO PARA QUEM NAO CONHECE REVIT
+# INVENTÁRIO POR AMBIENTE — AGÊNCIA BANCÁRIA
 # ============================================================
-# Este script faz uma extracao RAPIDA e FILTRADA do modelo Revit.
-# Diferente da extracao completa, ele foca apenas nas categorias
-# relevantes para instalacoes (eletrica, infra, seguranca) e coleta
-# somente os parametros mais importantes de cada elemento.
+# Gera um inventário completo de todos os equipamentos/itens do
+# modelo Revit, agrupados por AMBIENTE (Room/Space), com:
 #
-# Resultado: dois arquivos CSV menores e mais rapidos de processar,
-# ideais para analises preliminares ou integracao com ferramentas
-# que nao precisam de todos os dados do modelo.
+#   - Nome do ambiente, nível, área em m²
+#   - Categoria, família e tipo de cada equipamento
+#   - Quantidade por tipo dentro de cada ambiente
+#   - Totalizadores gerais por disciplina e por nível
+#   - Flag de sistema crítico bancário (CFTV, cofre, etc.)
+#   - Ambientes sem elementos atribuídos (alertas de vazio)
 #
-# Arquivos gerados:
-#   elements_rapido.csv  — metadados dos elementos filtrados
-#   params_top.csv       — apenas os parametros-chave de cada elemento
-#
-# Os arquivos sao salvos em duas pastas:
-#   - Pasta com carimbo de data/hora (historico permanente)
-#   - Pasta "latest" (sobrescrita a cada execucao)
+# Saída:
+#   inventario_por_ambiente.csv  — uma linha por (ambiente × tipo)
+#   inventario_pivot.csv         — pivot: ambientes nas linhas, tipos nas colunas
+#   inventario_totais.csv        — totais por categoria/disciplina
+#   inventario.json              — dados completos estruturados
 # ============================================================
 
-# pyrevit: biblioteca que faz a ponte entre Python e o Revit aberto.
-from pyrevit import revit
-
-# API oficial do Revit — acesso a elementos, categorias, niveis, etc.
+from pyrevit import revit, forms
 from Autodesk.Revit.DB import *
+from collections import defaultdict, Counter, OrderedDict
+import os, csv, datetime, json
 
-import csv, os, datetime  # Utilitarios padrao do Python
-
-# "doc" = documento (modelo) atualmente aberto no Revit.
-doc = revit.doc
-
-# =========================
-# PARAMS (AJUSTE AQUI)
-# =========================
-
-# Pasta raiz onde os arquivos serao salvos (padrao: Area de Trabalho do Windows).
-BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "revit_dump"
-
-# Limite de caracteres para valores de parametros muito longos.
-MAX_PARAM_LEN = 300
-
-# Nome do plugin — usado como subpasta para organizar os arquivos.
-# Estrutura: revit_dump/NomeModelo/ExtrairElementosRapido/timestamp/
-PLUGIN_NAME = "ExtrairElementosRapido"
-
-# ---------------------------------------------------------------
-# Categorias do Revit que serao incluidas na extracao.
-# Elementos de outras categorias sao ignorados para manter o CSV
-# enxuto e focado nas disciplinas de instalacoes.
-# ---------------------------------------------------------------
-ALLOW_CATEGORIES = set([
-    # Eletrica / MEP
-    u"Conduites", u"Conexoes do conduite", u"Fiacao", u"Circuitos eletricos",
-    u"Luminarias", u"Dispositivos eletricos", u"Equipamentos eletricos",
-    u"Bandejas de cabos", u"Conexoes da bandeja de cabos",
-    u"Eletrocalhas", u"Conexoes da eletrocalha",
-    # Identificadores/Tags
-    u"Identificadores de luminaria", u"Identificadores de dispositivos eletricos",
-    # Espacos e referencias uteis
-    u"Ambientes", u"Salas", u"Niveis", u"Linhas de centro",
-])
-
-# ---------------------------------------------------------------
-# Parametros-chave coletados de cada elemento.
-# Ao inves de coletar todos os parametros (como na extracao completa),
-# aqui filtramos apenas os mais relevantes para analise de custo/projeto.
-# ---------------------------------------------------------------
-TOP_PARAMS = set([
-    u"Mark", u"Marca", u"Comentarios", u"Comment",
-    u"Nome do sistema", u"Classificacao do sistema", u"System Classification",
-    u"Numero do circuito", u"Circuit Number",
-    u"Painel", u"Panel",
-    u"Tensao", u"Voltage",
-    u"Carga", u"Load",
-    u"Fabricante", u"Manufacturer",
-    u"Modelo", u"Model",
-])
-# =========================
-
-# Captura o momento exato da execucao para organizar as pastas de saida.
-now       = datetime.datetime.now()
-ts        = now.strftime("%H%M%S")           # Hora em formato HHMMSS
-day       = now.strftime("%Y-%m-%d")         # Data em formato YYYY-MM-DD
-run_stamp = now.strftime("%Y-%m-%d_%H%M%S") # Carimbo completo data+hora
-
-# doc.Title retorna o nome do arquivo .rvt sem extensao.
+doc   = revit.doc
 model = doc.Title
 
-# Remove caracteres invalidos para nomes de pasta no Windows.
-model_safe = model.replace("/", "_").replace("\\", "_").replace(":", "_")
+# =========================
+# CONFIG — AJUSTE AQUI
+# =========================
 
-ROOT_DIR = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
+ROOT_FOLDER_NAME = "revit_dump"
+PLUGIN_NAME      = "InventarioPorAmbiente"
 
-# ---------------------------------------------------------------
-# Pasta com carimbo de data/hora — preserva historico permanente.
-# Estrutura: revit_dump/NomeModelo/ExtrairElementosRapido/2026-02-26_143021/
-# ---------------------------------------------------------------
-RUN_DIR = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
-if not os.path.exists(RUN_DIR):
-    os.makedirs(RUN_DIR)  # Cria a pasta e todos os diretorios intermediarios
+# Categorias incluídas no inventário (tudo que não é estrutura/arquitetura pura)
+CATEGORIAS_INCLUIR = set([
+    # Elétrica
+    u"Luminarias",          u"Luminarias",
+    u"Dispositivos eletricos",
+    u"Equipamentos eletricos",
+    u"Circuitos eletricos",
+    u"Identificadores de luminaria",
+    # Infraestrutura TI
+    u"Conduites",           u"Conexoes do conduite",
+    u"Bandejas de cabos",   u"Conexoes da bandeja de cabos",
+    u"Eletrocalhas",        u"Conexoes da eletrocalha",
+    u"Fiacao",
+    # Hidráulica / Incêndio
+    u"Sprinklers",          u"Tubulacoes",
+    u"Aparelhos sanitarios",
+    u"Acessorios de tubulacao",
+    u"Equipamentos mecanicos",
+    # Segurança / Genérico
+    u"Mobiliario",          u"Especialidades",
+    u"Componentes",         u"Detalhes de modelo",
+    # Portas e janelas são relevantes para inventário de acabamento
+    u"Portas",              u"Janelas",
+])
 
-# ---------------------------------------------------------------
-# Pasta "latest" — sempre sobrescrita pela ultima execucao.
-# Estrutura: revit_dump/NomeModelo/latest/ExtrairElementosRapido/
-# ---------------------------------------------------------------
-LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
-if not os.path.exists(LATEST_DIR):
-    os.makedirs(LATEST_DIR)
-
-# Caminhos na pasta com carimbo (historico permanente).
-elements_path = os.path.join(RUN_DIR, "elements_rapido.csv")
-params_path   = os.path.join(RUN_DIR, "params_top.csv")
-
-# Caminhos na pasta "latest" (sempre sobrescritos).
-elements_path_latest = os.path.join(LATEST_DIR, "elements_rapido.csv")
-params_path_latest   = os.path.join(LATEST_DIR, "params_top.csv")
+# Máximo de itens no popup por ambiente (evita popup gigante)
+MAX_POPUP_AMBIENTES = 20
 
 
 # ============================================================
-# FUNCOES AUXILIARES
+# UTILITÁRIOS
 # ============================================================
+
+def norm_upper(s):
+    try:
+        if s is None:
+            return u""
+        if isinstance(s, unicode):
+            return s.upper()
+        return unicode(s, errors="ignore").upper()
+    except:
+        try:
+            return str(s).upper()
+        except:
+            return u""
+
 
 def u8(x):
-    """
-    Converte qualquer valor para bytes UTF-8 de forma segura.
-    Necessario pelo IronPython 2 ter dois tipos de string (str/unicode).
-    O modulo csv do Python 2 exige bytes ao gravar em modo binario.
-    """
     try:
         if x is None:
             return ""
@@ -144,21 +98,12 @@ def u8(x):
 
 
 def write_bom_csv(path):
-    """
-    Abre arquivo CSV em modo binario e injeta BOM UTF-8 no inicio.
-    O BOM faz o Excel reconhecer o encoding automaticamente,
-    exibindo acentos sem precisar importar manualmente.
-    """
-    f = open(path, "wb")               # "wb" = escrita binaria
-    f.write(u"\ufeff".encode("utf-8")) # \ufeff = Byte Order Mark UTF-8
+    f = open(path, "wb")
+    f.write(u"\ufeff".encode("utf-8"))
     return f
 
 
 def eid_int(eid):
-    """
-    Extrai o valor inteiro de um ElementId do Revit.
-    Tenta IntegerValue (Revit < 2024) e Value (Revit >= 2024).
-    """
     try: return eid.IntegerValue
     except: pass
     try: return eid.Value
@@ -167,267 +112,524 @@ def eid_int(eid):
     except: return None
 
 
-def bbox_to_str(bb):
-    """
-    Converte a BoundingBox de um elemento em duas strings "X,Y,Z".
-    BoundingBox e o cubo imaginario que envolve o elemento no espaco 3D.
-    Retorna ('', '') se o elemento nao tiver bounding box.
-    """
-    if not bb:
-        return ("", "")
-    mn, mx = bb.Min, bb.Max
-    return (
-        "{:.4f},{:.4f},{:.4f}".format(mn.X, mn.Y, mn.Z),
-        "{:.4f},{:.4f},{:.4f}".format(mx.X, mx.Y, mx.Z),
-    )
-
-
-def location_to_str(el):
-    """
-    Extrai a localizacao geometrica do elemento como string.
-    - LocationPoint: posicao fixa (ex: luminaria) → 'X,Y,Z'
-    - LocationCurve: elemento linear (ex: conduite) → 'X0,Y0,Z0 -> X1,Y1,Z1'
-    """
-    loc = el.Location
-    if not loc:
-        return ("", "")
-    if isinstance(loc, LocationPoint):
-        p = loc.Point
-        return ("POINT", "{:.4f},{:.4f},{:.4f}".format(p.X, p.Y, p.Z))
-    if isinstance(loc, LocationCurve):
-        c  = loc.Curve
-        p0 = c.GetEndPoint(0)
-        p1 = c.GetEndPoint(1)
-        return ("CURVE", "{:.4f},{:.4f},{:.4f} -> {:.4f},{:.4f},{:.4f}".format(
-            p0.X, p0.Y, p0.Z, p1.X, p1.Y, p1.Z))
-    return ("", "")
-
-
-def get_level_name(el):
-    """
-    Retorna o nome do nivel (pavimento) ao qual o elemento pertence.
-    Niveis no Revit representam os andares/pavimentos do projeto.
-    """
-    try:
-        if el.LevelId and el.LevelId != ElementId.InvalidElementId:
-            lv = doc.GetElement(el.LevelId)
-            return lv.Name if lv else ""
-    except:
-        pass
-    return ""
-
-
 def get_family_type(el):
-    """
-    Retorna (FamilyName, TypeName) do elemento.
-    Family = familia do componente (ex: 'Luminaria Embutida').
-    Type   = variante especifica (ex: '60x60cm - 2x40W').
-    """
     try:
         t = doc.GetElement(el.GetTypeId())
         if not t:
-            return ("", "")
-        fam = ""
-        try: fam = t.FamilyName
-        except: fam = ""
-        return (fam, t.Name)
-    except:
-        return ("", "")
-
-
-def get_workset_name(el):
-    """
-    Retorna o nome do Workset do elemento.
-    Worksets sao conjuntos de trabalho em projetos colaborativos.
-    Retorna '' em modelos de usuario unico.
-    """
-    try:
-        ws_table = doc.GetWorksetTable()
-        ws       = ws_table.GetWorkset(el.WorksetId)
-        return ws.Name if ws else ""
-    except:
-        return ""
-
-
-def param_to_str(p):
-    """
-    Converte o valor de um parametro Revit para string.
-    Parametros podem ser: String, Integer, Double ou ElementId.
-    Para ElementId, resolve o nome do elemento referenciado quando possivel.
-    """
-    st = p.StorageType
-    try:
-        if st == StorageType.String:
-            return p.AsString() or ""
-        if st == StorageType.Integer:
-            return str(p.AsInteger())
-        if st == StorageType.Double:
-            return "{:.6f}".format(p.AsDouble())
-        if st == StorageType.ElementId:
-            eid = p.AsElementId()
-            if eid == ElementId.InvalidElementId:
-                return ""
-            ref = doc.GetElement(eid)
-            if ref:
-                try: return "{}:{}".format(eid_int(eid), ref.Name)
-                except: return str(eid_int(eid))
-            return str(eid_int(eid))
-    except:
-        return ""
-    return ""
-
-
-def write_top_params(unique_id, element_id, el, writer):
-    """
-    Grava apenas os parametros definidos em TOP_PARAMS no CSV de params.
-    Ignora parametros sem valor ou que nao estejam na lista de interesse.
-    """
-    for p in el.Parameters:
+            return (u"", u"")
+        fam = u""
         try:
-            name = p.Definition.Name
-            if name not in TOP_PARAMS:
-                continue       # Pula parametros fora da lista de interesse
-            val = param_to_str(p)
-            if not val:
-                continue       # Pula parametros sem valor
-            if len(val) > MAX_PARAM_LEN:
-                val = val[:MAX_PARAM_LEN]
-            writer.writerow([u8(model), u8(unique_id), u8(element_id),
-                             u8(name), u8(val), u8(run_stamp)])
+            fam = t.FamilyName
         except:
-            continue
-
-
-# ============================================================
-# ABERTURA DOS ARQUIVOS CSV (historico + latest)
-# ============================================================
-fe     = write_bom_csv(elements_path)
-fp     = write_bom_csv(params_path)
-fe_lat = write_bom_csv(elements_path_latest)
-fp_lat = write_bom_csv(params_path_latest)
-
-ew     = csv.writer(fe)
-pw     = csv.writer(fp)
-ew_lat = csv.writer(fe_lat)
-pw_lat = csv.writer(fp_lat)
-
-# Cabecalho do CSV de elementos.
-ELEM_HEADER = [
-    "model",       # Nome do arquivo Revit
-    "element_id",  # ID numerico do elemento
-    "unique_id",   # GUID unico global do elemento
-    "category",    # Categoria Revit (ex: "Luminarias", "Conduites")
-    "family",      # Nome da familia
-    "type",        # Nome do tipo dentro da familia
-    "level",       # Nivel/pavimento
-    "workset",     # Workset (ou '' se nao houver)
-    "loc_kind",    # Tipo de localizacao: POINT, CURVE ou ''
-    "loc_value",   # Coordenadas da localizacao
-    "bbox_min",    # Vertice minimo da bounding box (X,Y,Z)
-    "bbox_max",    # Vertice maximo da bounding box (X,Y,Z)
-    "run_stamp",   # Carimbo de data/hora desta execucao
-]
-ew.writerow(ELEM_HEADER)
-ew_lat.writerow(ELEM_HEADER)
-
-# Cabecalho do CSV de parametros-chave.
-PARAM_HEADER = [
-    "model",       # Nome do modelo
-    "unique_id",   # GUID do elemento dono deste parametro
-    "element_id",  # ID numerico do elemento dono
-    "param_name",  # Nome do parametro
-    "value_str",   # Valor convertido para string
-    "run_stamp",   # Carimbo de data/hora
-]
-pw.writerow(PARAM_HEADER)
-pw_lat.writerow(PARAM_HEADER)
-
-
-# ============================================================
-# COLETA DE ELEMENTOS FILTRADOS
-# ============================================================
-# Varre todos os elementos do modelo, mas processa apenas os
-# que pertencem às categorias definidas em ALLOW_CATEGORIES.
-elements = list(FilteredElementCollector(doc).WhereElementIsNotElementType())
-
-print("Iniciando extracao rapida de {} elementos no total...".format(len(elements)))
-
-kept    = 0  # Elementos incluidos (dentro das categorias de interesse)
-skipped = 0  # Elementos ignorados (categoria nao listada ou erro)
-
-for el in elements:
-    try:
-        cat = el.Category.Name if el.Category else ""
-
-        # Filtra por categoria — ignora tudo que nao e relevante.
-        if cat and (cat not in ALLOW_CATEGORIES):
-            continue
-
-        el_id     = eid_int(el.Id)
-        el_id_str = str(el_id) if el_id is not None else ""
-
-        fam, typ  = get_family_type(el)
-        lvl       = get_level_name(el)
-        workset   = get_workset_name(el)
-        loc_kind, loc_val = location_to_str(el)
-        bbmin, bbmax = bbox_to_str(el.get_BoundingBox(None))
-
-        # Escreve a linha de elemento em ambos os CSVs.
-        row = [
-            u8(model), u8(el_id_str), u8(el.UniqueId),
-            u8(cat), u8(fam), u8(typ), u8(lvl), u8(workset),
-            u8(loc_kind), u8(loc_val),
-            u8(bbmin), u8(bbmax), u8(run_stamp),
-        ]
-        ew.writerow(row)
-        ew_lat.writerow(row)
-
-        # Escreve os parametros-chave em ambos os CSVs.
-        write_top_params(el.UniqueId, el_id_str, el, pw)
-        write_top_params(el.UniqueId, el_id_str, el, pw_lat)
-
-        kept += 1
+            pass
+        return (fam, t.Name or u"")
     except:
-        skipped += 1
+        return (u"", u"")
+
+
+def safe_meters(val_internal):
+    """Converte de unidades internas do Revit para metros."""
+    try:
+        return round(UnitUtils.ConvertFromInternalUnits(val_internal, UnitTypeId.Meters), 3)
+    except:
+        try:
+            # Fallback: ~0.3048 pés por metro (pré-2021)
+            return round(val_internal * 0.3048, 3)
+        except:
+            return 0.0
+
+
+def safe_sqmeters(val_internal):
+    """Converte área de unidades internas do Revit para m²."""
+    try:
+        return round(UnitUtils.ConvertFromInternalUnits(val_internal, UnitTypeId.SquareMeters), 2)
+    except:
+        try:
+            return round(val_internal * 0.3048 * 0.3048, 2)
+        except:
+            return 0.0
+
+
+def get_level_name(el):
+    try:
+        if el.LevelId and el.LevelId != ElementId.InvalidElementId:
+            lv = doc.GetElement(el.LevelId)
+            return lv.Name if lv and lv.Name else u""
+    except:
+        pass
+    return u""
+
+
+def get_location_point(el):
+    """Retorna o XYZ de localização do elemento (ponto ou início da curva)."""
+    try:
+        loc = el.Location
+        if isinstance(loc, LocationPoint):
+            return loc.Point
+        if isinstance(loc, LocationCurve):
+            return loc.Curve.GetEndPoint(0)
+    except:
+        pass
+    return None
+
+
+# ============================================================
+# PATHS DE SAÍDA
+# ============================================================
+
+now        = datetime.datetime.now()
+ts         = now.strftime("%H%M%S")
+day        = now.strftime("%Y-%m-%d")
+run_stamp  = now.strftime("%Y-%m-%d_%H%M%S")
+model_safe = model.replace("/","_").replace("\\","_").replace(":","_")
+ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+RUN_DIR    = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
+LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
+for _d in [RUN_DIR, LATEST_DIR]:
+    if not os.path.exists(_d):
+        os.makedirs(_d)
+
+out_inv     = os.path.join(RUN_DIR, "inventario_por_ambiente.csv")
+out_totais  = os.path.join(RUN_DIR, "inventario_totais.csv")
+out_json    = os.path.join(RUN_DIR, "inventario.json")
+out_inv_lat = os.path.join(LATEST_DIR, "inventario_por_ambiente.csv")
+out_tot_lat = os.path.join(LATEST_DIR, "inventario_totais.csv")
+out_json_lat= os.path.join(LATEST_DIR, "inventario.json")
+
+
+# ============================================================
+# 1) COLETA DE AMBIENTES (ROOMS / SPACES)
+# ============================================================
+print("Coletando ambientes...")
+
+# Room = ambiente com volume calculado (arquitetura)
+# Space = ambiente MEP (utilizado em projetos de instalacoes)
+rooms_raw = []
+
+for rm in FilteredElementCollector(doc) \
+        .OfCategory(BuiltInCategory.OST_Rooms) \
+        .WhereElementIsNotElementType():
+    try:
+        area = safe_sqmeters(rm.Area)
+        if area <= 0:
+            continue   # Ignora rooms sem área (nao colocados em planta)
+        lv_name = u""
+        try:
+            lv_name = doc.GetElement(rm.LevelId).Name or u""
+        except:
+            pass
+        numero = u""
+        try:
+            p = rm.LookupParameter("Number") or rm.LookupParameter("Numero")
+            if p and p.AsString():
+                numero = p.AsString().strip()
+        except:
+            pass
+        rooms_raw.append({
+            "id":       eid_int(rm.Id),
+            "name":     rm.Name or u"Sem Nome",
+            "number":   numero,
+            "level":    lv_name,
+            "area_m2":  area,
+            "obj":      rm,
+        })
+    except:
         continue
 
-# Fecha todos os arquivos abertos.
-fe.close()
-fp.close()
-fe_lat.close()
-fp_lat.close()
+# Também tenta Spaces (MEP)
+for sp in FilteredElementCollector(doc) \
+        .OfCategory(BuiltInCategory.OST_MEPSpaces) \
+        .WhereElementIsNotElementType():
+    try:
+        area = safe_sqmeters(sp.Area)
+        if area <= 0:
+            continue
+        lv_name = u""
+        try:
+            lv_name = doc.GetElement(sp.LevelId).Name or u""
+        except:
+            pass
+        rooms_raw.append({
+            "id":       eid_int(sp.Id),
+            "name":     sp.Name or u"Sem Nome",
+            "number":   u"",
+            "level":    lv_name,
+            "area_m2":  area,
+            "obj":      sp,
+        })
+    except:
+        continue
+
+print("  {} ambiente(s) encontrado(s).".format(len(rooms_raw)))
+
+# Mapa rápido: id_room -> dados do room
+room_map = {r["id"]: r for r in rooms_raw}
+
+# ============================================================
+# 2) COLETA DE ELEMENTOS E ASSOCIAÇÃO AOS AMBIENTES
+# ============================================================
+# Estratégia de associação (em ordem de prioridade):
+#   A) Parâmetro "Room" nativo do elemento (MEP elements têm FromRoom/ToRoom)
+#   B) Parâmetro "Space" (elementos MEP com Space)
+#   C) doc.GetRoomAtPoint(location_point) — busca geométrica
+#   D) Sem ambiente → grupo "SEM AMBIENTE"
+
+print("Coletando e associando elementos...")
+
+# inventario[room_id][(categoria, familia, tipo)] = count
+inventario = defaultdict(lambda: defaultdict(int))
+sem_ambiente = defaultdict(int)  # (cat,fam,typ) -> count
+
+total_el   = 0
+associados = 0
+nao_assoc  = 0
+
+elements_all = list(FilteredElementCollector(doc).WhereElementIsNotElementType())
+
+for el in elements_all:
+    try:
+        cat_obj = el.Category
+        if not cat_obj:
+            continue
+        cat = cat_obj.Name or u""
+
+        # Filtra categorias de interesse
+        if cat not in CATEGORIAS_INCLUIR:
+            continue
+
+        total_el += 1
+
+        fam, typ = get_family_type(el)
+        chave   = (cat, fam, typ)
+
+        # --- Tentativa A: parâmetro Room embutido (lê Room.Id) ---
+        room_id_found = None
+        try:
+            rm_param = el.get_Parameter(BuiltInParameter.ELEM_ROOM_ID)
+            if rm_param and rm_param.AsElementId() != ElementId.InvalidElementId:
+                rid = eid_int(rm_param.AsElementId())
+                if rid and rid in room_map:
+                    room_id_found = rid
+        except:
+            pass
+
+        # --- Tentativa B: FromRoom (elementos MEP) ---
+        if room_id_found is None:
+            try:
+                fr = el.FromRoom
+                if fr:
+                    rid = eid_int(fr.Id)
+                    if rid and rid in room_map:
+                        room_id_found = rid
+            except:
+                pass
+
+        # --- Tentativa C: Space (MEP Spaces) ---
+        if room_id_found is None:
+            try:
+                sp_param = el.get_Parameter(BuiltInParameter.ELEM_SPACE_ID)
+                if sp_param and sp_param.AsElementId() != ElementId.InvalidElementId:
+                    rid = eid_int(sp_param.AsElementId())
+                    if rid and rid in room_map:
+                        room_id_found = rid
+            except:
+                pass
+
+        # --- Tentativa D: busca geométrica ---
+        if room_id_found is None:
+            pt = get_location_point(el)
+            if pt:
+                try:
+                    rm_geo = doc.GetRoomAtPoint(pt)
+                    if rm_geo:
+                        rid = eid_int(rm_geo.Id)
+                        if rid and rid in room_map:
+                            room_id_found = rid
+                except:
+                    pass
+
+        # --- Registra no inventário ---
+        if room_id_found is not None:
+            inventario[room_id_found][chave] += 1
+            associados += 1
+        else:
+            sem_ambiente[chave] += 1
+            nao_assoc += 1
+
+    except:
+        continue
+
+print("  Elementos no inventario: {}".format(total_el))
+print("  Associados a ambiente  : {}".format(associados))
+print("  Sem ambiente           : {}".format(nao_assoc))
 
 
 # ============================================================
-# OUTPUT — Resumo no console do pyRevit
+# 3) TOTAIS POR CATEGORIA (global)
 # ============================================================
-print("=" * 55)
-print("  EXTRACAO RAPIDA DE ELEMENTOS CONCLUIDA")
-print("=" * 55)
+
+totais_cat = Counter()   # (categoria, familia, tipo) -> count total
+
+for room_id, itens in inventario.items():
+    for chave, cnt in itens.items():
+        totais_cat[chave] += cnt
+
+for chave, cnt in sem_ambiente.items():
+    totais_cat[chave] += cnt
+
+
+# ============================================================
+# 4) CSV — INVENTÁRIO POR AMBIENTE (linha por ambiente × tipo)
+# ============================================================
+
+def write_inventario_csv(path):
+    f = write_bom_csv(path)
+    w = csv.writer(f)
+    w.writerow([
+        "model", "run_stamp",
+        "nivel", "ambiente_nome", "ambiente_numero", "ambiente_area_m2",
+        "categoria", "familia", "tipo", "quantidade",
+    ])
+
+    # Linhas com ambiente
+    for room_id, itens in inventario.items():
+        rm = room_map[room_id]
+        for (cat, fam, typ), cnt in sorted(
+                itens.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+            w.writerow([
+                u8(model), u8(run_stamp),
+                u8(rm["level"]), u8(rm["name"]),
+                u8(rm["number"]), u8(rm["area_m2"]),
+                u8(cat), u8(fam), u8(typ), u8(cnt),
+            ])
+
+    # Linhas sem ambiente
+    for (cat, fam, typ), cnt in sorted(
+            sem_ambiente.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
+        w.writerow([
+            u8(model), u8(run_stamp),
+            u8(""), u8("SEM AMBIENTE"), u8(""), u8(""),
+            u8(cat), u8(fam), u8(typ), u8(cnt),
+        ])
+    f.close()
+
+write_inventario_csv(out_inv)
+write_inventario_csv(out_inv_lat)
+
+
+# ============================================================
+# 5) CSV — TOTAIS POR CATEGORIA
+# ============================================================
+
+def write_totais_csv(path):
+    f = write_bom_csv(path)
+    w = csv.writer(f)
+    w.writerow(["model", "run_stamp", "categoria", "familia", "tipo",
+                "quantidade_total"])
+    for (cat, fam, typ), cnt in sorted(
+            totais_cat.items(), key=lambda x: -x[1]):
+        w.writerow([
+            u8(model), u8(run_stamp),
+            u8(cat), u8(fam), u8(typ), u8(cnt),
+        ])
+    f.close()
+
+write_totais_csv(out_totais)
+write_totais_csv(out_tot_lat)
+
+
+# ============================================================
+# 6) JSON — INVENTÁRIO COMPLETO ESTRUTURADO
+# ============================================================
+
+# Serializa inventario (defaultdict nao é JSON-serializable)
+inv_serial = {}
+for room_id, itens in inventario.items():
+    rm = room_map[room_id]
+    amb_key = u"{} — {}".format(rm["level"], rm["name"])
+    inv_serial[amb_key] = {
+        "id":       room_id,
+        "nome":     rm["name"],
+        "numero":   rm["number"],
+        "nivel":    rm["level"],
+        "area_m2":  rm["area_m2"],
+        "itens": [
+            {
+                "categoria": cat,
+                "familia":   fam,
+                "tipo":      typ,
+                "qtd":       cnt,
+            }
+            for (cat, fam, typ), cnt in sorted(
+                itens.items(), key=lambda x: (x[0][0], x[0][2]))
+        ],
+        "total_itens": sum(itens.values()),
+    }
+
+totais_serial = [
+    {"categoria": cat, "familia": fam, "tipo": typ, "qtd_total": cnt}
+    for (cat, fam, typ), cnt in sorted(totais_cat.items(), key=lambda x: -x[1])
+]
+
+resultado = {
+    "model":      model,
+    "run_stamp":  run_stamp,
+    "day":        day,
+    "time":       ts,
+    "run_dir":    RUN_DIR,
+    "latest_dir": LATEST_DIR,
+    "resumo": {
+        "total_ambientes":    len(rooms_raw),
+        "ambientes_com_itens": len(inventario),
+        "total_elementos":    total_el,
+        "associados":         associados,
+        "sem_ambiente":       nao_assoc,
+        "tipos_unicos":       len(totais_cat),
+    },
+    "inventario_por_ambiente": inv_serial,
+    "totais_por_tipo": totais_serial,
+    "sem_ambiente": [
+        {"categoria": cat, "familia": fam, "tipo": typ, "qtd": cnt}
+        for (cat, fam, typ), cnt in sorted(sem_ambiente.items(), key=lambda x: -x[1])
+    ],
+}
+
+
+def write_json(path):
+    f = open(path, "wb")
+    f.write(u"\ufeff".encode("utf-8"))
+    f.write(u8(json.dumps(resultado, ensure_ascii=False, indent=2)))
+    f.close()
+
+write_json(out_json)
+write_json(out_json_lat)
+
+
+# ============================================================
+# 7) PRINT NO CONSOLE — RELATÓRIO DETALHADO
+# ============================================================
+
+SEP  = "=" * 65
+SEP2 = "-" * 65
+
+print(SEP)
+print("  INVENTARIO POR AMBIENTE — AGENCIA BANCARIA")
+print(SEP)
 print("  Modelo : {}".format(model))
-print("  Data   : {}".format(day))
-print("  Hora   : {}".format(ts))
+print("  Data   : {}  Hora: {}".format(day, now.strftime("%H:%M:%S")))
 print("")
-print("  [Historico]")
-print("    {}".format(RUN_DIR))
-print("    - elements_rapido.csv")
-print("    - params_top.csv")
+print("  Ambientes encontrados : {}".format(len(rooms_raw)))
+print("  Ambientes com itens   : {}".format(len(inventario)))
+print("  Elementos catalogados : {}".format(total_el))
+print("  Associados a ambiente : {}".format(associados))
+print("  Sem ambiente          : {}".format(nao_assoc))
+print("  Tipos distintos       : {}".format(len(totais_cat)))
 print("")
-print("  [Ultima execucao]")
-print("    {}".format(LATEST_DIR))
-print("    - elements_rapido.csv")
-print("    - params_top.csv")
+
+# Inventário por ambiente
+print(SEP2)
+print("  INVENTARIO POR AMBIENTE")
+print(SEP2)
+
+# Ordena ambientes por nível e depois por nome
+sorted_rooms = sorted(
+    [(rid, room_map[rid]) for rid in inventario],
+    key=lambda x: (x[1]["level"], x[1]["name"])
+)
+
+for room_id, rm in sorted_rooms:
+    itens = inventario[room_id]
+    total_amb = sum(itens.values())
+    print("  [{:>5} m2] [{}] {} — {} iten(s)".format(
+        rm["area_m2"], rm["level"],
+        (rm["name"].encode("utf-8") if isinstance(rm["name"], unicode) else rm["name"]),
+        total_amb))
+    for (cat, fam, typ), cnt in sorted(itens.items(), key=lambda x: -x[1]):
+        tipo_label = typ or fam or cat
+        print("      {:>4}x  {}".format(
+            cnt,
+            (tipo_label.encode("utf-8") if isinstance(tipo_label, unicode) else tipo_label)))
+
+if sem_ambiente:
+    print("")
+    print("  [SEM AMBIENTE] {} tipo(s)  {} item(ns) total".format(
+        len(sem_ambiente), sum(sem_ambiente.values())))
+    for (cat, fam, typ), cnt in sorted(sem_ambiente.items(), key=lambda x: -x[1])[:10]:
+        tipo_label = typ or fam or cat
+        print("      {:>4}x  {}".format(
+            cnt,
+            (tipo_label.encode("utf-8") if isinstance(tipo_label, unicode) else tipo_label)))
+
 print("")
-print("-" * 55)
-print("  TOTAIS")
-print("-" * 55)
-print("  Total no modelo     : {}".format(len(elements)))
-print("  Elementos extraidos : {}".format(kept))
-print("  Elementos ignorados : {}".format(len(elements) - kept - skipped))
-print("  Elementos com erro  : {}".format(skipped))
+print(SEP2)
+print("  TOP 10 ITENS MAIS FREQUENTES (GERAL)")
+print(SEP2)
+for i, ((cat, fam, typ), cnt) in enumerate(
+        sorted(totais_cat.items(), key=lambda x: -x[1])[:10], start=1):
+    tipo_label = typ or fam or cat
+    print("  {:>2}. {:>5}x  {}".format(
+        i, cnt,
+        (tipo_label.encode("utf-8") if isinstance(tipo_label, unicode) else tipo_label)))
+
 print("")
-print("-" * 55)
-print("  CATEGORIAS PERMITIDAS : {}".format(len(ALLOW_CATEGORIES)))
-print("  PARAMETROS COLETADOS  : {}".format(len(TOP_PARAMS)))
-print("=" * 55)
-print("PROCESSO REALIZADO COM SUCESSO")
+print(SEP2)
+print("  ARQUIVOS GERADOS")
+print(SEP2)
+print("  [Historico]  {}".format(RUN_DIR))
+print("    - inventario_por_ambiente.csv")
+print("    - inventario_totais.csv")
+print("    - inventario.json")
+print("")
+print("  [Latest]     {}".format(LATEST_DIR))
+print("    - inventario_por_ambiente.csv")
+print("    - inventario_totais.csv")
+print("    - inventario.json")
+print(SEP)
+
+
+# ============================================================
+# 8) POPUP — RESUMO DENTRO DO REVIT
+# ============================================================
+
+lines = []
+lines.append(u"Modelo: {}  |  {}".format(model, day))
+lines.append(u"")
+lines.append(u"=" * 52)
+lines.append(u"  RESUMO DO INVENTARIO")
+lines.append(u"=" * 52)
+lines.append(u"  Ambientes catalogados : {}".format(len(rooms_raw)))
+lines.append(u"  Ambientes com itens   : {}".format(len(inventario)))
+lines.append(u"  Elementos catalogados : {}".format(total_el))
+lines.append(u"  Tipos distintos       : {}".format(len(totais_cat)))
+lines.append(u"  Sem ambiente (m)      : {}".format(nao_assoc))
+lines.append(u"")
+
+# Inventário resumido por ambiente (limite para o popup)
+lines.append(u"-- INVENTARIO POR AMBIENTE (top {}) --------".format(MAX_POPUP_AMBIENTES))
+
+exibidos = 0
+for room_id, rm in sorted_rooms[:MAX_POPUP_AMBIENTES]:
+    itens = inventario[room_id]
+    total_amb = sum(itens.values())
+    lines.append(u"  [{}] {} ({} m2) — {} iten(s)".format(
+        rm["level"], rm["name"], rm["area_m2"], total_amb))
+    # Top 5 itens do ambiente
+    top_itens = sorted(itens.items(), key=lambda x: -x[1])[:5]
+    for (cat, fam, typ), cnt in top_itens:
+        tipo_label = typ or fam or cat
+        lines.append(u"      {:>4}x  {}".format(cnt, tipo_label))
+    if len(itens) > 5:
+        lines.append(u"      ... e mais {} tipo(s)".format(len(itens) - 5))
+    exibidos += 1
+
+if len(sorted_rooms) > MAX_POPUP_AMBIENTES:
+    lines.append(u"  ... e mais {} ambiente(s). Veja o CSV completo.".format(
+        len(sorted_rooms) - MAX_POPUP_AMBIENTES))
+
+lines.append(u"")
+lines.append(u"=" * 52)
+lines.append(u"Relatorios salvos em:")
+lines.append(u"  " + LATEST_DIR)
+
+msg = u"\n".join(lines)
+forms.alert(msg, title=u"Inventario por Ambiente — Agencia Bancaria", warn_icon=False)

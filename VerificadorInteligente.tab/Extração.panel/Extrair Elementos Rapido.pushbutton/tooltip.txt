@@ -1,13 +1,19 @@
-Extrai todos os elementos do modelo BIM e seus parâmetros.
+Gera o inventário completo de equipamentos por ambiente (Room/Space).
+
+Para cada ambiente lista:
+• Categoria, Família e Tipo de cada item
+• Quantidade por tipo
+• Flag de sistema crítico bancário
+• Área do ambiente em m²
+
+Detecta automaticamente:
+CFTV, Controle de Acesso, UPS, SPDA, Sprinkler,
+Rack TI, Quadros Elétricos, Alarme, Cofre, PCD
 
 Gera:
-- elements.csv (cadastro base de elementos)
-- params.csv (parâmetros em formato EAV)
-
-Inclui:
-• Categoria, Família, Tipo
-• Nível e localização
-• Bounding Box
+• inventario_por_ambiente.csv
+• inventario_totais.csv
+• inventario.json
 • Parâmetros de instância e tipo
 
 Objetivo:

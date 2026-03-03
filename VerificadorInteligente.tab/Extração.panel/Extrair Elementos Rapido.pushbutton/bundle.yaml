@@ -1,11 +1,15 @@
-title: Extrair Elementos (Rápido)
+﻿title: Inventário
 author: Emerson Rafael
 tooltip: |
-  Exportação otimizada para análise rápida (MEP/Infra/Segurança).
+  Inventário completo por ambiente para agência bancária.
+
+  Associa cada equipamento ao seu Room/Space e agrupa por:
+  Ambiente → Categoria → Família / Tipo → Quantidade
+
+  Detecta sistemas críticos: CFTV, Controle de Acesso, UPS,
+  SPDA, Sprinkler, Rack TI, Quadros Elétricos, Alarme, Cofre.
 
   Saídas:
-  • elements_*.csv
-  • params_top_*.csv
-
-  Inclui apenas categorias relevantes e parâmetros-chave.
-  Recomendado para execução em lote por agência.
+  • inventario_por_ambiente.csv
+  • inventario_totais.csv
+  • inventario.json

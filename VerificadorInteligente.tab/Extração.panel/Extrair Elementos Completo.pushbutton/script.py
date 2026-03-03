@@ -42,7 +42,7 @@ doc = revit.doc
 
 # Pasta raiz onde os arquivos serão salvos (padrão: Área de Trabalho do Windows).
 BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "revit_dump"
+ROOT_FOLDER_NAME = "RevitScan"
 
 # Limite de caracteres para valores de parâmetros muito longos.
 # Evita que textos enormes (ex: descrições completas) inflem o CSV/JSON.
