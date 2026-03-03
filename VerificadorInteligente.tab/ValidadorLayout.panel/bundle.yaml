@@ -1,0 +1,5 @@
+title: Validação de Layout
+tooltip: |
+  Ferramentas para validar o layout do modelo Revit:
+  - Verificacao de Folhas: identificar folhas sem elementos ou fora de folha
+  - Verificacao de Disciplinas: elementos sem disciplina ou com disciplina incorreta

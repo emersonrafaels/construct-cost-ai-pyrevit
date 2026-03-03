@@ -1,0 +1,7 @@
+name: Verificador Inteligente
+author: Emerson Rafael
+description: >
+  Ferramentas pyRevit para analise, extracao e validacao de modelos Revit (Itau Unibanco)
+url: ""
+website: ""
+version: "0.1.0"

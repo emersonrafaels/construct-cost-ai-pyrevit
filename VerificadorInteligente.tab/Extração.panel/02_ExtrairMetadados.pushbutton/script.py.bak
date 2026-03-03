@@ -40,10 +40,10 @@ doc = revit.doc
 
 # Pasta raiz onde os arquivos serao salvos (padrao: Area de Trabalho do Windows).
 BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "revit_dump"
+ROOT_FOLDER_NAME = "RevitScan"
 
 # Nome do plugin — usado como subpasta para organizar os arquivos.
-# Estrutura: revit_dump/NomeModelo/ExtrairMetadados/timestamp/
+# Estrutura: RevitScan/NomeModelo/ExtrairMetadados/timestamp/
 PLUGIN_NAME = "ExtrairMetadados"
 # =========================================
 
@@ -63,7 +63,7 @@ ROOT_DIR = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
 
 # ---------------------------------------------------------------
 # Pasta com carimbo de data/hora — preserva historico permanente.
-# Estrutura: revit_dump/NomeModelo/ExtrairMetadados/2026-02-26_143021/
+# Estrutura: RevitScan/NomeModelo/ExtrairMetadados/2026-02-26_143021/
 # ---------------------------------------------------------------
 RUN_DIR = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
 if not os.path.exists(RUN_DIR):
@@ -71,7 +71,7 @@ if not os.path.exists(RUN_DIR):
 
 # ---------------------------------------------------------------
 # Pasta "latest" — sempre sobrescrita pela ultima execucao.
-# Estrutura: revit_dump/NomeModelo/latest/ExtrairMetadados/
+# Estrutura: RevitScan/NomeModelo/latest/ExtrairMetadados/
 # ---------------------------------------------------------------
 LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
 if not os.path.exists(LATEST_DIR):

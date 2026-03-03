@@ -74,7 +74,7 @@ PLUGIN_NAME = "ExtrairElementosCompleto"
 # ---------------------------------------------------------------
 # Pasta com carimbo de data/hora — preserva histórico permanente.
 # Estrutura gerada:
-#   revit_dump/NomeModelo/2026-02-26_143021/ExtrairElementosCompleto/
+#   RevitScan/NomeModelo/2026-02-26_143021/ExtrairElementosCompleto/
 # ---------------------------------------------------------------
 RUN_DIR = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
 if not os.path.exists(RUN_DIR):
@@ -85,7 +85,7 @@ if not os.path.exists(RUN_DIR):
 # Útil para dashboards ou automações que precisam ler o resultado
 # mais recente sem precisar descobrir qual pasta é a mais nova.
 # Estrutura gerada:
-#   revit_dump/NomeModelo/latest/ExtrairElementosCompleto/
+#   RevitScan/NomeModelo/latest/ExtrairElementosCompleto/
 # ---------------------------------------------------------------
 LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
 if not os.path.exists(LATEST_DIR):

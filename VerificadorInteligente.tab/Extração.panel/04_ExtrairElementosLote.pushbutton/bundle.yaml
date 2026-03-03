@@ -1,0 +1,31 @@
+﻿title: Extração em Lote
+author: Emerson Rafael
+tooltip: |
+  Extração automatizada em lote sobre múltiplos arquivos .rvt.
+
+  Fluxo em duas etapas:
+    1. Escolha o modo de extração:
+         • Extrair Metadados    (sheets_views.csv)
+         • Extrair Completo     (elements.csv + params.csv + json)
+         • Realizar Inventario  (inventario_por_folha.csv + json)
+    2. Selecione a pasta com os arquivos .rvt
+
+  O script abre cada arquivo em modo Detach (sem salvar),
+  executa a extração escolhida e fecha automaticamente.
+
+  Modo — Inventário por Ambiente:
+  • inventario_por_ambiente.csv  →  elementos por Room/Space
+  • inventario_totais.csv        →  totais por categoria/tipo
+  • inventario.json              →  dados estruturados completos
+
+  Modo — Extração Completa:
+  • elements_*.csv   →  todos os elementos do modelo
+  • params_*.csv     →  todos os parâmetros por elemento
+
+  Saídas organizadas por modelo em:
+    Desktop/RevitScan/<Modelo>/latest/<Modo>/
+    Desktop/RevitScan/<Modelo>/<Modo>/<carimbo_hora>/
+
+  Recomendação:
+  Usar após executar "Extrair Metadados" individualmente
+  para já ter o mapeamento de folhas/disciplinas disponível.

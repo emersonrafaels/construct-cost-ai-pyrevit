@@ -1,0 +1,453 @@
+﻿# -*- coding: utf-8 -*-
+# ============================================================
+# INVENTARIO POR FOLHA -- LAYOUT ITAU
+# ============================================================
+# Gera inventario de equipamentos agrupado por Folha (Sheet):
+#   inventario_por_folha.csv   -- linha por (folha x elemento)
+#   inventario_totais.csv      -- totais globais por elemento/nome
+#   inventario.json            -- dados estruturados completos
+#
+# Colunas principais: Folha | Elemento | Nome | Qtd
+# Uso: quantificar equipamentos e itens por folha/ambiente
+#      nos layouts do Itau.
+#
+# Compativel com Revit 2022 - 2026.x  |  IronPython 2 / CPython 3
+# ============================================================
+
+# Imports explicitos -- NUNCA use "from Autodesk.Revit.DB import *"
+from pyrevit import revit, forms
+
+from Autodesk.Revit.DB import (
+    FilteredElementCollector,
+    BuiltInCategory,
+    BuiltInParameter,
+    ElementId,
+    ViewSheet,
+    Viewport,
+)
+
+try:
+    from Autodesk.Revit.DB import UnitUtils, UnitTypeId
+    _HAS_UNIT_TYPE_ID = True
+except ImportError:
+    _HAS_UNIT_TYPE_ID = False
+
+from collections import defaultdict, Counter
+import os, csv, datetime, json, sys
+
+# documento
+doc   = revit.doc
+model = doc.Title
+
+# ============================================================
+# CONFIG
+# ============================================================
+BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
+ROOT_FOLDER_NAME = "RevitScan"
+PLUGIN_NAME      = "InventarioPorFolha"
+MAX_POPUP_FOLHAS = 20
+
+CATEGORIAS_INCLUIR = set([
+    u"Luminarias",
+    u"Dispositivos eletricos",
+    u"Equipamentos eletricos",
+    u"Circuitos eletricos",
+    u"Identificadores de luminaria",
+    u"Conduites",           u"Conexoes do conduite",
+    u"Bandejas de cabos",   u"Conexoes da bandeja de cabos",
+    u"Eletrocalhas",        u"Conexoes da eletrocalha",
+    u"Fiacao",
+    u"Sprinklers",          u"Tubulacoes",
+    u"Aparelhos sanitarios",
+    u"Acessorios de tubulacao",
+    u"Equipamentos mecanicos",
+    u"Mobiliario",          u"Especialidades",
+    u"Componentes",         u"Detalhes de modelo",
+    u"Portas",              u"Janelas",
+])
+
+# ============================================================
+# UTILITARIOS -- Python 2 e Python 3
+# ============================================================
+try:
+    _unicode = unicode
+except NameError:
+    _unicode = str
+
+
+def u8(x):
+    if x is None:
+        return ""
+    try:
+        if sys.version_info[0] >= 3:
+            return str(x)
+        if isinstance(x, _unicode):
+            return x.encode("utf-8")
+        return str(x)
+    except:
+        return ""
+
+
+def write_bom_csv(path):
+    if sys.version_info[0] >= 3:
+        f = open(path, "w", encoding="utf-8-sig", newline="")
+    else:
+        f = open(path, "wb")
+        f.write(b"\xef\xbb\xbf")
+    return f
+
+
+def eid_int(eid):
+    try:
+        return int(eid.IntegerValue)
+    except:
+        try:
+            return int(eid.Value)
+        except:
+            return None
+
+
+def get_family_type(el):
+    fam = u""
+    typ = u""
+    try:
+        t = doc.GetElement(el.GetTypeId())
+        if t:
+            try:
+                fam = t.FamilyName or u""
+            except:
+                pass
+            try:
+                typ = t.Name or u""
+            except:
+                pass
+    except:
+        pass
+    return fam, typ
+
+
+# ============================================================
+# PATHS DE SAIDA
+# ============================================================
+now        = datetime.datetime.now()
+day        = now.strftime("%Y-%m-%d")
+run_stamp  = now.strftime("%Y-%m-%d_%H%M%S")
+model_safe = model.replace("/","_").replace("\\","_").replace(":","_")
+ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+RUN_DIR    = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
+LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
+for _d in [RUN_DIR, LATEST_DIR]:
+    if not os.path.exists(_d):
+        os.makedirs(_d)
+
+out_folha     = os.path.join(RUN_DIR,    "inventario_por_folha.csv")
+out_totais    = os.path.join(RUN_DIR,    "inventario_totais.csv")
+out_json      = os.path.join(RUN_DIR,    "inventario.json")
+out_folha_lat = os.path.join(LATEST_DIR, "inventario_por_folha.csv")
+out_tot_lat   = os.path.join(LATEST_DIR, "inventario_totais.csv")
+out_json_lat  = os.path.join(LATEST_DIR, "inventario.json")
+
+
+# ============================================================
+# 1) COLETA DE FOLHAS (SHEETS)
+# ============================================================
+print("Coletando folhas (sheets)...")
+
+sheets_data = {}   # sheet_id -> {"numero", "nome"}
+
+for vs in (FilteredElementCollector(doc)
+           .OfClass(ViewSheet)
+           .WhereElementIsNotElementType()):
+    try:
+        sid  = eid_int(vs.Id)
+        num  = (vs.SheetNumber or u"").strip()
+        nome = (vs.Name or u"Sem Nome").strip()
+        sheets_data[sid] = {"id": sid, "numero": num, "nome": nome}
+    except:
+        continue
+
+print("  {} folha(s) encontrada(s).".format(len(sheets_data)))
+
+
+# ============================================================
+# 2) MAPEAMENTO FOLHA -> ELEMENTOS (via Viewports)
+# ============================================================
+# Cada elemento e contado apenas UMA VEZ por folha,
+# mesmo que apareca em multiplas vistas da mesma folha.
+# ─────────────────────────────────────────────────────────────
+print("Associando elementos as folhas...")
+
+# sheet_id -> dict[el_id -> (cat, fam, typ)]
+sheet_el_info = defaultdict(dict)
+total_seen = 0
+
+for vs in (FilteredElementCollector(doc)
+           .OfClass(ViewSheet)
+           .WhereElementIsNotElementType()):
+    try:
+        sid = eid_int(vs.Id)
+        if sid not in sheets_data:
+            continue
+
+        vp_ids = vs.GetAllViewports()
+        if not vp_ids:
+            continue
+
+        for vp_id in vp_ids:
+            try:
+                vp = doc.GetElement(vp_id)
+                if not vp:
+                    continue
+                view_id = vp.ViewId
+                view    = doc.GetElement(view_id)
+                if not view:
+                    continue
+
+                for el in (FilteredElementCollector(doc, view_id)
+                           .WhereElementIsNotElementType()):
+                    try:
+                        cat_obj = el.Category
+                        if not cat_obj:
+                            continue
+                        cat = cat_obj.Name or u""
+                        if cat not in CATEGORIAS_INCLUIR:
+                            continue
+
+                        el_id = eid_int(el.Id)
+                        if el_id is None:
+                            continue
+
+                        # Registra apenas uma vez por folha
+                        if el_id not in sheet_el_info[sid]:
+                            fam, typ = get_family_type(el)
+                            sheet_el_info[sid][el_id] = (cat, fam, typ)
+                            total_seen += 1
+                    except:
+                        continue
+            except:
+                continue
+    except:
+        continue
+
+print("  Total de registros (folha x elemento): {}".format(total_seen))
+
+
+# ============================================================
+# 3) AGREGAR: (folha, elemento, nome) -> qtd
+# ============================================================
+# inventario[sheet_id][(fam, typ)] = count
+inventario = defaultdict(lambda: defaultdict(int))
+
+for sid, el_dict in sheet_el_info.items():
+    for el_id, (cat, fam, typ) in el_dict.items():
+        chave = (fam, typ)
+        inventario[sid][chave] += 1
+
+folhas_com_itens = len(inventario)
+folhas_sem_itens = len(sheets_data) - folhas_com_itens
+
+totais = Counter()
+for sid, itens in inventario.items():
+    for chave, cnt in itens.items():
+        totais[chave] += cnt
+
+
+# ============================================================
+# 4) CSV -- INVENTARIO POR FOLHA
+#    Colunas: folha | folha_nome | elemento | nome | qtd
+# ============================================================
+def write_folha_csv(path):
+    f = write_bom_csv(path)
+    w = csv.writer(f)
+    w.writerow(["model", "run_stamp",
+                "folha", "folha_nome",
+                "elemento", "nome", "qtd"])
+    for sid in sorted(inventario.keys(),
+                      key=lambda x: sheets_data.get(x, {}).get("numero", "")):
+        sh    = sheets_data.get(sid, {"numero": "", "nome": ""})
+        itens = inventario[sid]
+        for (fam, typ), cnt in sorted(itens.items(),
+                                      key=lambda x: (x[0][0], x[0][1])):
+            w.writerow([
+                u8(model), u8(run_stamp),
+                u8(sh["numero"]), u8(sh["nome"]),
+                u8(fam), u8(typ), u8(cnt),
+            ])
+    f.close()
+
+write_folha_csv(out_folha)
+write_folha_csv(out_folha_lat)
+
+
+# ============================================================
+# 5) CSV -- TOTAIS GLOBAIS
+# ============================================================
+def write_totais_csv(path):
+    f = write_bom_csv(path)
+    w = csv.writer(f)
+    w.writerow(["model", "run_stamp", "elemento", "nome", "qtd_total"])
+    for (fam, typ), cnt in sorted(totais.items(), key=lambda x: -x[1]):
+        w.writerow([u8(model), u8(run_stamp), u8(fam), u8(typ), u8(cnt)])
+    f.close()
+
+write_totais_csv(out_totais)
+write_totais_csv(out_tot_lat)
+
+
+# ============================================================
+# 6) JSON
+# ============================================================
+inv_serial = {}
+for sid, itens in inventario.items():
+    sh  = sheets_data.get(sid, {"numero": "", "nome": ""})
+    key = u"{} -- {}".format(sh["numero"], sh["nome"])
+    inv_serial[key] = {
+        "id":          sid,
+        "folha":       sh["numero"],
+        "folha_nome":  sh["nome"],
+        "total_itens": sum(itens.values()),
+        "itens": [
+            {"elemento": fam, "nome": typ, "qtd": cnt}
+            for (fam, typ), cnt in sorted(itens.items())
+        ],
+    }
+
+resultado = {
+    "model":     model,
+    "run_stamp": run_stamp,
+    "resumo": {
+        "total_folhas":     len(sheets_data),
+        "folhas_com_itens": folhas_com_itens,
+        "folhas_sem_itens": folhas_sem_itens,
+        "total_elementos":  total_seen,
+        "tipos_distintos":  len(totais),
+    },
+    "inventario_por_folha": inv_serial,
+    "totais_por_tipo": [
+        {"elemento": fam, "nome": typ, "qtd_total": cnt}
+        for (fam, typ), cnt in sorted(totais.items(), key=lambda x: -x[1])
+    ],
+}
+
+json_str = json.dumps(resultado, ensure_ascii=False, indent=2)
+
+for jpath in (out_json, out_json_lat):
+    if sys.version_info[0] >= 3:
+        with open(jpath, "w", encoding="utf-8-sig") as fj:
+            fj.write(json_str)
+    else:
+        fj = open(jpath, "wb")
+        fj.write(b"\xef\xbb\xbf")
+        if isinstance(json_str, _unicode):
+            fj.write(json_str.encode("utf-8"))
+        else:
+            fj.write(json_str)
+        fj.close()
+
+
+# ============================================================
+# 7) CONSOLE -- RELATORIO
+# ============================================================
+SEP  = "=" * 65
+SEP2 = "-" * 65
+
+print(SEP)
+print("  INVENTARIO POR FOLHA -- LAYOUT ITAU")
+print(SEP)
+print("  Modelo : {}".format(model))
+print("  Data   : {}  Hora: {}".format(day, now.strftime("%H:%M:%S")))
+print("")
+print("  Total de folhas       : {}".format(len(sheets_data)))
+print("  Folhas com itens      : {}".format(folhas_com_itens))
+print("  Folhas sem itens      : {}".format(folhas_sem_itens))
+print("  Elementos catalogados : {}".format(total_seen))
+print("  Tipos distintos       : {}".format(len(totais)))
+print("")
+
+sorted_sheets = sorted(
+    [(sid, sheets_data[sid]) for sid in inventario if sid in sheets_data],
+    key=lambda x: x[1]["numero"]
+)
+
+print(SEP2)
+print("  INVENTARIO POR FOLHA")
+print(SEP2)
+
+for sid, sh in sorted_sheets:
+    itens    = inventario[sid]
+    total_sh = sum(itens.values())
+    print("  [{}] {} -- {} item(ns)".format(sh["numero"], sh["nome"], total_sh))
+    for (fam, typ), cnt in sorted(itens.items(), key=lambda x: -x[1]):
+        label = typ or fam or u"(sem nome)"
+        print("      {:>4}x  {}".format(cnt, label))
+
+print("")
+print(SEP2)
+print("  TOP 15 MAIS FREQUENTES (GLOBAL)")
+print(SEP2)
+for i, ((fam, typ), cnt) in enumerate(
+        sorted(totais.items(), key=lambda x: -x[1])[:15], start=1):
+    label = typ or fam or u"(sem nome)"
+    print("  {:>2}. {:>5}x  {}".format(i, cnt, label))
+
+print("")
+print(SEP2)
+print("  ARQUIVOS GERADOS")
+print(SEP2)
+print("  [Historico]  {}".format(RUN_DIR))
+print("    inventario_por_folha.csv / inventario_totais.csv / inventario.json")
+print("  [Latest]     {}".format(LATEST_DIR))
+print(SEP)
+
+
+# ============================================================
+# 8) POPUP
+# ============================================================
+lines = [
+    u"Modelo: {}  |  {}".format(model, day),
+    u"",
+    u"=" * 52,
+    u"  RESUMO DO INVENTARIO POR FOLHA",
+    u"=" * 52,
+    u"  Total de folhas       : {}".format(len(sheets_data)),
+    u"  Folhas com itens      : {}".format(folhas_com_itens),
+    u"  Elementos catalogados : {}".format(total_seen),
+    u"  Tipos distintos       : {}".format(len(totais)),
+    u"",
+    u"-- TOP {} FOLHAS --------------------".format(MAX_POPUP_FOLHAS),
+]
+
+for sid, sh in sorted_sheets[:MAX_POPUP_FOLHAS]:
+    itens    = inventario[sid]
+    total_sh = sum(itens.values())
+    lines.append(u"  [{}] {} -- {} item(ns)".format(
+        sh["numero"], sh["nome"], total_sh))
+    for (fam, typ), cnt in sorted(itens.items(), key=lambda x: -x[1])[:5]:
+        label = typ or fam or u"(sem nome)"
+        lines.append(u"      {:>4}x  {}".format(cnt, label))
+    if len(itens) > 5:
+        lines.append(u"      ... e mais {} tipo(s)".format(len(itens) - 5))
+
+if len(sorted_sheets) > MAX_POPUP_FOLHAS:
+    lines.append(u"  ... e mais {} folha(s). Veja o CSV!".format(
+        len(sorted_sheets) - MAX_POPUP_FOLHAS))
+
+lines += [
+    u"",
+    u"-- TOP 10 ELEMENTOS -----------------",
+]
+for i, ((fam, typ), cnt) in enumerate(
+        sorted(totais.items(), key=lambda x: -x[1])[:10], start=1):
+    label = typ or fam or u"(sem nome)"
+    lines.append(u"  {:>2}. {:>4}x  {}".format(i, cnt, label))
+
+lines += [
+    u"",
+    u"=" * 52,
+    u"Relatorios salvos em:",
+    u"  " + LATEST_DIR,
+]
+
+forms.alert(u"\n".join(lines),
+            title=u"Inventario por Folha -- Layout Itau",
+            warn_icon=False)

@@ -1,0 +1,7 @@
+title: Extração
+tooltip: |
+  Ferramentas para extrair dados estruturais do modelo Revit:
+  - Metadados: folhas, vistas e disciplinas
+  - Elementos Completo: todos os parametros de instancia e tipo
+  - Inventario por Folha: quantitativo de equipamentos por prancha
+  - Extracao em Lote: processa multiplos arquivos .rvt de uma vez

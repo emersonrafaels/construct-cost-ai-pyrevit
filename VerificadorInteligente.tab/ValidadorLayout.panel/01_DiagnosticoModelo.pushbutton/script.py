@@ -49,7 +49,7 @@ app = __revit__.Application  # Objeto principal do Revit (novo — nao usado ant
 # PARAMS (AJUSTE AQUI)
 # =========================================
 BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "revit_dump"
+ROOT_FOLDER_NAME = "RevitScan"
 PLUGIN_NAME      = "TestAPI"
 TOP_N_CATS       = 20  # Quantas categorias exibir no ranking
 # =========================================

@@ -1,0 +1,26 @@
+﻿EXTRAÇÃO EM LOTE
+================
+Abre um formulário para configurar a extração em lote:
+
+  1. Selecione o modo:
+       • Inventário por Ambiente — agrupa elementos por Room/Space
+       • Extração Completa — exporta todos os elementos e parâmetros
+
+  2. Selecione a pasta com os arquivos .rvt
+
+  3. Escolha se deve incluir subpastas
+
+O script abre cada .rvt automaticamente, extrai os dados e fecha
+sem salvar. Os relatórios são salvos em:
+  Desktop\RevitScan\<NomeModelo>\<Modo>\<carimbo_hora>\
+  Desktop\RevitScan\<NomeModelo>\latest\<Modo>\
+
+Arquivos gerados (Inventário por Ambiente):
+  inventario_por_ambiente.csv
+  inventario_totais.csv
+  inventario.json
+
+Arquivos gerados (Extração Completa):
+  elements.csv
+  params.csv
+  model_hierarchy.json

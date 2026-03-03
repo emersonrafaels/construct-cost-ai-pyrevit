@@ -1,0 +1,723 @@
+﻿# -*- coding: utf-8 -*-
+
+# ============================================================
+# EXTRAÇÃO EM LOTE — Múltiplos Arquivos .rvt
+# ============================================================
+# Formulário com duas etapas:
+#   1. Selecione o modo:
+#        • Inventário por Ambiente  (inventario_por_ambiente.csv …)
+#        • Extração Completa        (elements.csv + params.csv …)
+#   2. Selecione a pasta com os arquivos .rvt
+#
+# O script abre cada arquivo, executa a extração escolhida e
+# fecha sem salvar, acumulando os relatórios em:
+#   Desktop/RevitScan/<NomeModelo>/<Modo>/<carimbo_hora>/
+#   Desktop/RevitScan/<NomeModelo>/latest/<Modo>/
+# ============================================================
+
+from pyrevit import revit, forms, script, output
+from Autodesk.Revit.DB import (
+    FilteredElementCollector,
+    BuiltInCategory,
+    BuiltInParameter,
+    ElementId,
+    LocationPoint,
+    LocationCurve,
+    ModelPathUtils,
+    OpenOptions,
+    DetachFromCentralOption,
+    WorksetConfiguration,
+    WorksetConfigurationOption,
+    StorageType,
+)
+from collections import defaultdict, Counter
+import os, csv, datetime, json
+
+# Handle da aplicação Revit (necessário para abrir arquivos)
+app = __revit__.Application          # type: ignore  # noqa
+
+# ============================================================
+# CONFIG
+# ============================================================
+BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
+ROOT_FOLDER_NAME = "RevitScan"
+MAX_PARAM_LEN    = 500          # Trunca valores muito longos no modo Completo
+
+# Categorias monitoradas pelo modo Inventário
+CATEGORIAS_INCLUIR = set([
+    u"Luminarias",
+    u"Dispositivos eletricos",
+    u"Equipamentos eletricos",
+    u"Circuitos eletricos",
+    u"Identificadores de luminaria",
+    u"Conduites",
+    u"Conexoes do conduite",
+    u"Bandejas de cabos",
+    u"Conexoes da bandeja de cabos",
+    u"Eletrocalhas",
+    u"Conexoes da eletrocalha",
+    u"Fiacao",
+    u"Sprinklers",
+    u"Tubulacoes",
+    u"Aparelhos sanitarios",
+    u"Acessorios de tubulacao",
+    u"Equipamentos mecanicos",
+    u"Mobiliario",
+    u"Especialidades",
+    u"Componentes",
+    u"Detalhes de modelo",
+    u"Portas",
+    u"Janelas",
+])
+
+
+# ============================================================
+# FORMULÁRIO — Passo 1: modo de extração
+# ============================================================
+MODOS_LABEL = [u"Inventário por Ambiente", u"Extração Completa"]
+
+modo_label = forms.CommandSwitchWindow.show(
+    MODOS_LABEL,
+    message=u"Selecione o modo de extração em lote:",
+)
+if not modo_label:
+    script.exit()
+
+modo = "inventario" if u"Invent" in modo_label else "completo"
+
+# ============================================================
+# FORMULÁRIO — Passo 2: pasta com os arquivos .rvt
+# ============================================================
+pasta_rvt = forms.pick_folder(title=u"Selecione a pasta com os arquivos .rvt")
+if not pasta_rvt:
+    script.exit()
+
+# ============================================================
+# FORMULÁRIO — Passo 3: incluir subpastas?
+# ============================================================
+incluir_sub = forms.alert(
+    u"Incluir subpastas na busca por arquivos .rvt?",
+    title=u"Extração em Lote",
+    yes=True,
+    no=True,
+)
+
+# ============================================================
+# LOCALIZA OS ARQUIVOS .rvt
+# ============================================================
+rvt_files = []
+if incluir_sub:
+    for root, dirs, files in os.walk(pasta_rvt):
+        for f in files:
+            if f.lower().endswith(".rvt"):
+                rvt_files.append(os.path.join(root, f))
+else:
+    for f in sorted(os.listdir(pasta_rvt)):
+        if f.lower().endswith(".rvt"):
+            rvt_files.append(os.path.join(pasta_rvt, f))
+
+if not rvt_files:
+    forms.alert(
+        u"Nenhum arquivo .rvt encontrado na pasta selecionada.",
+        exitscript=True,
+    )
+
+# ============================================================
+# CONFIRMAÇÃO ANTES DE INICIAR
+# ============================================================
+confirmacao = forms.alert(
+    u"{} arquivo(s) .rvt encontrado(s).\n\nModo: {}\n\nIniciar extração em lote?".format(
+        len(rvt_files), modo_label
+    ),
+    title=u"Extração em Lote — Confirmar",
+    yes=True,
+    no=True,
+)
+if not confirmacao:
+    script.exit()
+
+
+# ============================================================
+# UTILITÁRIOS COMPARTILHADOS
+# ============================================================
+
+def u8(x):
+    """Converte qualquer valor para bytes UTF-8 (IronPython 2)."""
+    try:
+        if x is None:
+            return ""
+        if isinstance(x, unicode):          # noqa
+            return x.encode("utf-8")
+        return str(x)
+    except:
+        try:
+            return unicode(x).encode("utf-8")  # noqa
+        except:
+            return ""
+
+
+def write_bom_csv(path):
+    """Abre CSV para escrita com BOM UTF-8."""
+    f = open(path, "wb")
+    f.write("\xef\xbb\xbf")
+    return f
+
+
+def make_dirs(*paths):
+    for p in paths:
+        if not os.path.exists(p):
+            os.makedirs(p)
+
+
+def eid_int(eid):
+    try:
+        return int(eid.IntegerValue)
+    except:
+        try:
+            return int(eid.Value)
+        except:
+            return None
+
+
+def safe_sqmeters(val):
+    try:
+        from Autodesk.Revit.DB import UnitUtils, UnitTypeId
+        return round(UnitUtils.ConvertFromInternalUnits(val, UnitTypeId.SquareMeters), 2)
+    except:
+        try:
+            return round(float(val) * 0.0929, 2)
+        except:
+            return 0.0
+
+
+def get_family_type(el):
+    fam = u""
+    typ = u""
+    try:
+        t = el.Document.GetElement(el.GetTypeId())
+        if t:
+            try:
+                fam = t.FamilyName or u""
+            except:
+                fam = u""
+            try:
+                typ = t.Name or u""
+            except:
+                typ = u""
+    except:
+        pass
+    return fam, typ
+
+
+def get_location_point(el):
+    try:
+        loc = el.Location
+        if isinstance(loc, LocationPoint):
+            return loc.Point
+        if isinstance(loc, LocationCurve):
+            return loc.Curve.Evaluate(0.5, True)
+    except:
+        pass
+    return None
+
+
+def get_param_value(param):
+    try:
+        st = param.StorageType
+        if st == StorageType.String:
+            v = param.AsString() or ""
+            return v[:MAX_PARAM_LEN]
+        elif st == StorageType.Integer:
+            return param.AsInteger()
+        elif st == StorageType.Double:
+            return round(param.AsDouble(), 6)
+        elif st == StorageType.ElementId:
+            return param.AsElementId().IntegerValue
+    except:
+        pass
+    return ""
+
+
+# ============================================================
+# MODO: EXTRAÇÃO COMPLETA
+#   elements.csv  — um elemento por linha
+#   params.csv    — todos os parâmetros de instância e tipo
+#   model_hierarchy.json — hierarquia Categoria > Família > Tipo
+# ============================================================
+
+def extrair_completo(doc, model, model_safe, run_stamp, day, now):
+    ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+    RUN_DIR    = os.path.join(ROOT_DIR, model_safe, "ExtrairElementosCompleto", run_stamp)
+    LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", "ExtrairElementosCompleto")
+    make_dirs(RUN_DIR, LATEST_DIR)
+
+    elements_path        = os.path.join(RUN_DIR,    "elements.csv")
+    params_path          = os.path.join(RUN_DIR,    "params.csv")
+    json_path            = os.path.join(RUN_DIR,    "model_hierarchy.json")
+    elements_path_latest = os.path.join(LATEST_DIR, "elements.csv")
+    params_path_latest   = os.path.join(LATEST_DIR, "params.csv")
+    json_path_latest     = os.path.join(LATEST_DIR, "model_hierarchy.json")
+
+    elements_all = list(
+        FilteredElementCollector(doc).WhereElementIsNotElementType()
+    )
+
+    hierarchy = {}
+
+    fe     = write_bom_csv(elements_path)
+    fp     = write_bom_csv(params_path)
+    fe_lat = write_bom_csv(elements_path_latest)
+    fp_lat = write_bom_csv(params_path_latest)
+
+    we     = csv.writer(fe)
+    wp     = csv.writer(fp)
+    we_lat = csv.writer(fe_lat)
+    wp_lat = csv.writer(fp_lat)
+
+    el_hdr = ["model", "run_stamp", "element_id", "category", "family", "type",
+               "level", "location_x", "location_y", "location_z"]
+    pm_hdr = ["model", "run_stamp", "element_id", "source", "param_name", "param_value"]
+
+    for w in (we, we_lat):
+        w.writerow(el_hdr)
+    for w in (wp, wp_lat):
+        w.writerow(pm_hdr)
+
+    count = 0
+    for el in elements_all:
+        try:
+            cat_obj = el.Category
+            if not cat_obj:
+                continue
+            cat = u8(cat_obj.Name or "")
+            eid = eid_int(el.Id)
+            fam, typ = get_family_type(el)
+
+            lv_name = ""
+            try:
+                lv = doc.GetElement(el.LevelId)
+                if lv:
+                    lv_name = u8(lv.Name)
+            except:
+                pass
+
+            pt = get_location_point(el)
+            lx = round(pt.X, 4) if pt else ""
+            ly = round(pt.Y, 4) if pt else ""
+            lz = round(pt.Z, 4) if pt else ""
+
+            el_row = [u8(model), u8(run_stamp), eid, cat,
+                      u8(fam), u8(typ), lv_name, lx, ly, lz]
+            we.writerow(el_row)
+            we_lat.writerow(el_row)
+
+            # Parâmetros de instância
+            try:
+                for pm in el.Parameters:
+                    try:
+                        pm_row = [u8(model), u8(run_stamp), eid, "instance",
+                                  u8(pm.Definition.Name), u8(get_param_value(pm))]
+                        wp.writerow(pm_row)
+                        wp_lat.writerow(pm_row)
+                    except:
+                        pass
+            except:
+                pass
+
+            # Parâmetros de tipo
+            try:
+                t = doc.GetElement(el.GetTypeId())
+                if t:
+                    for pm in t.Parameters:
+                        try:
+                            pm_row = [u8(model), u8(run_stamp), eid, "type",
+                                      u8(pm.Definition.Name), u8(get_param_value(pm))]
+                            wp.writerow(pm_row)
+                            wp_lat.writerow(pm_row)
+                        except:
+                            pass
+            except:
+                pass
+
+            # Hierarquia JSON
+            cat_n = u8(cat_obj.Name or "Sem Categoria")
+            fam_n = u8(fam) or "(sem familia)"
+            typ_n = u8(typ) or "(sem tipo)"
+            hierarchy.setdefault(cat_n, {}).setdefault(fam_n, {}).setdefault(typ_n, []).append(eid)
+            count += 1
+        except:
+            continue
+
+    fe.close()
+    fp.close()
+    fe_lat.close()
+    fp_lat.close()
+
+    # JSON
+    payload = {
+        "model":          model,
+        "run_stamp":      run_stamp,
+        "total_elements": count,
+        "hierarchy":      hierarchy,
+    }
+    for jpath in (json_path, json_path_latest):
+        fj = open(jpath, "wb")
+        fj.write(u"\ufeff".encode("utf-8"))
+        fj.write(u8(json.dumps(payload, ensure_ascii=False, indent=2)))
+        fj.close()
+
+    return count, RUN_DIR
+
+
+# ============================================================
+# MODO: INVENTÁRIO POR AMBIENTE
+#   inventario_por_ambiente.csv  — (ambiente × tipo × qtd)
+#   inventario_totais.csv        — totais por categoria/família/tipo
+#   inventario.json              — dados completos estruturados
+# ============================================================
+
+def extrair_inventario(doc, model, model_safe, run_stamp, day, now):
+    ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+    RUN_DIR    = os.path.join(ROOT_DIR, model_safe, "InventarioPorAmbiente", run_stamp)
+    LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", "InventarioPorAmbiente")
+    make_dirs(RUN_DIR, LATEST_DIR)
+
+    out_inv      = os.path.join(RUN_DIR,    "inventario_por_ambiente.csv")
+    out_totais   = os.path.join(RUN_DIR,    "inventario_totais.csv")
+    out_json     = os.path.join(RUN_DIR,    "inventario.json")
+    out_inv_lat  = os.path.join(LATEST_DIR, "inventario_por_ambiente.csv")
+    out_tot_lat  = os.path.join(LATEST_DIR, "inventario_totais.csv")
+    out_json_lat = os.path.join(LATEST_DIR, "inventario.json")
+
+    # ── Coleta de ambientes (Rooms + MEP Spaces) ──────────────
+    rooms_raw = []
+
+    for rm in (FilteredElementCollector(doc)
+               .OfCategory(BuiltInCategory.OST_Rooms)
+               .WhereElementIsNotElementType()):
+        try:
+            area = safe_sqmeters(rm.Area)
+            if area <= 0:
+                continue
+            lv_name = u""
+            try:
+                lv_name = doc.GetElement(rm.LevelId).Name or u""
+            except:
+                pass
+            numero = u""
+            try:
+                p = rm.LookupParameter("Number") or rm.LookupParameter("Numero")
+                if p and p.AsString():
+                    numero = p.AsString().strip()
+            except:
+                pass
+            rooms_raw.append({
+                "id":      eid_int(rm.Id),
+                "name":    rm.Name or u"Sem Nome",
+                "number":  numero,
+                "level":   lv_name,
+                "area_m2": area,
+                "obj":     rm,
+            })
+        except:
+            continue
+
+    for sp in (FilteredElementCollector(doc)
+               .OfCategory(BuiltInCategory.OST_MEPSpaces)
+               .WhereElementIsNotElementType()):
+        try:
+            area = safe_sqmeters(sp.Area)
+            if area <= 0:
+                continue
+            lv_name = u""
+            try:
+                lv_name = doc.GetElement(sp.LevelId).Name or u""
+            except:
+                pass
+            rooms_raw.append({
+                "id":      eid_int(sp.Id),
+                "name":    sp.Name or u"Sem Nome",
+                "number":  u"",
+                "level":   lv_name,
+                "area_m2": area,
+                "obj":     sp,
+            })
+        except:
+            continue
+
+    room_map = {r["id"]: r for r in rooms_raw}
+
+    # ── Associação de elementos aos ambientes ─────────────────
+    inventario   = defaultdict(lambda: defaultdict(int))
+    sem_ambiente = defaultdict(int)
+    total_el = associados = nao_assoc = 0
+
+    for el in FilteredElementCollector(doc).WhereElementIsNotElementType():
+        try:
+            cat_obj = el.Category
+            if not cat_obj:
+                continue
+            cat = cat_obj.Name or u""
+            if cat not in CATEGORIAS_INCLUIR:
+                continue
+            total_el += 1
+            fam, typ  = get_family_type(el)
+            chave     = (cat, fam, typ)
+            room_id_found = None
+
+            # A) Parâmetro Room embutido
+            try:
+                rm_param = el.get_Parameter(BuiltInParameter.ELEM_ROOM_ID)
+                if rm_param and rm_param.AsElementId() != ElementId.InvalidElementId:
+                    rid = eid_int(rm_param.AsElementId())
+                    if rid and rid in room_map:
+                        room_id_found = rid
+            except:
+                pass
+
+            # B) FromRoom (elementos MEP)
+            if room_id_found is None:
+                try:
+                    fr = el.FromRoom
+                    if fr:
+                        rid = eid_int(fr.Id)
+                        if rid and rid in room_map:
+                            room_id_found = rid
+                except:
+                    pass
+
+            # C) Space (MEP Spaces)
+            if room_id_found is None:
+                try:
+                    sp_param = el.get_Parameter(BuiltInParameter.ELEM_SPACE_ID)
+                    if sp_param and sp_param.AsElementId() != ElementId.InvalidElementId:
+                        rid = eid_int(sp_param.AsElementId())
+                        if rid and rid in room_map:
+                            room_id_found = rid
+                except:
+                    pass
+
+            # D) GetRoomAtPoint desabilitado — causa crash nativo no Revit 2026
+            # (exceção unmanaged não capturável pelo IronPython)
+
+            if room_id_found is not None:
+                inventario[room_id_found][chave] += 1
+                associados += 1
+            else:
+                sem_ambiente[chave] += 1
+                nao_assoc += 1
+        except:
+            continue
+
+    # ── Totais globais ─────────────────────────────────────────
+    totais_cat = Counter()
+    for room_id, itens in inventario.items():
+        for chave, cnt in itens.items():
+            totais_cat[chave] += cnt
+    for chave, cnt in sem_ambiente.items():
+        totais_cat[chave] += cnt
+
+    # ── CSV por ambiente ───────────────────────────────────────
+    hdr_inv = ["model", "run_stamp", "nivel", "ambiente_nome",
+               "ambiente_numero", "ambiente_area_m2",
+               "categoria", "familia", "tipo", "quantidade"]
+    for path in (out_inv, out_inv_lat):
+        f = write_bom_csv(path)
+        w = csv.writer(f)
+        w.writerow(hdr_inv)
+        for room_id, itens in inventario.items():
+            rm = room_map[room_id]
+            for (cat, fam, typ), cnt in sorted(itens.items()):
+                w.writerow([
+                    u8(model), u8(run_stamp),
+                    u8(rm["level"]), u8(rm["name"]), u8(rm["number"]),
+                    u8(rm["area_m2"]),
+                    u8(cat), u8(fam), u8(typ), u8(cnt),
+                ])
+        for (cat, fam, typ), cnt in sorted(sem_ambiente.items()):
+            w.writerow([
+                u8(model), u8(run_stamp),
+                "", "SEM AMBIENTE", "", "",
+                u8(cat), u8(fam), u8(typ), u8(cnt),
+            ])
+        f.close()
+
+    # ── CSV totais ─────────────────────────────────────────────
+    for path in (out_totais, out_tot_lat):
+        f = write_bom_csv(path)
+        w = csv.writer(f)
+        w.writerow(["model", "run_stamp", "categoria", "familia",
+                    "tipo", "quantidade_total"])
+        for (cat, fam, typ), cnt in sorted(totais_cat.items(), key=lambda x: -x[1]):
+            w.writerow([u8(model), u8(run_stamp),
+                        u8(cat), u8(fam), u8(typ), u8(cnt)])
+        f.close()
+
+    # ── JSON ───────────────────────────────────────────────────
+    inv_serial = {}
+    for room_id, itens in inventario.items():
+        rm  = room_map[room_id]
+        amb = u"{} \u2014 {}".format(rm["level"], rm["name"])
+        inv_serial[amb] = {
+            "id":      room_id,
+            "nome":    rm["name"],
+            "numero":  rm["number"],
+            "nivel":   rm["level"],
+            "area_m2": rm["area_m2"],
+            "itens": [
+                {"categoria": cat, "familia": fam, "tipo": typ, "qtd": cnt}
+                for (cat, fam, typ), cnt in sorted(itens.items())
+            ],
+            "total_itens": sum(itens.values()),
+        }
+
+    resultado = {
+        "model":      model,
+        "run_stamp":  run_stamp,
+        "resumo": {
+            "total_ambientes":  len(rooms_raw),
+            "total_elementos":  total_el,
+            "associados":       associados,
+            "sem_ambiente":     nao_assoc,
+            "tipos_unicos":     len(totais_cat),
+        },
+        "inventario_por_ambiente": inv_serial,
+        "totais_por_tipo": [
+            {"categoria": cat, "familia": fam, "tipo": typ, "qtd_total": cnt}
+            for (cat, fam, typ), cnt in sorted(totais_cat.items(), key=lambda x: -x[1])
+        ],
+        "sem_ambiente": [
+            {"categoria": cat, "familia": fam, "tipo": typ, "qtd": cnt}
+            for (cat, fam, typ), cnt in sorted(sem_ambiente.items(), key=lambda x: -x[1])
+        ],
+    }
+
+    for jpath in (out_json, out_json_lat):
+        fj = open(jpath, "wb")
+        fj.write(u"\ufeff".encode("utf-8"))
+        fj.write(u8(json.dumps(resultado, ensure_ascii=False, indent=2)))
+        fj.close()
+
+    return total_el, len(rooms_raw), associados, RUN_DIR
+
+
+# ============================================================
+# LOOP PRINCIPAL — abre, extrai, fecha cada .rvt
+# ============================================================
+now       = datetime.datetime.now()
+run_stamp = now.strftime("%Y-%m-%d_%H%M%S")
+day       = now.strftime("%Y-%m-%d")
+
+resultados = []   # [(filename, n_elementos, run_dir, n_ambientes_ou_None)]
+erros      = []   # [(filename, mensagem_de_erro)]
+
+out_panel = output.get_output()
+out_panel.print_md(
+    u"## Extração em Lote — {} arquivo(s)\n"
+    u"**Modo:** {}  |  **Início:** {}".format(
+        len(rvt_files), modo_label, now.strftime("%H:%M:%S")
+    )
+)
+out_panel.print_md(u"---")
+
+for idx, rvt_path in enumerate(rvt_files, start=1):
+    filename   = os.path.basename(rvt_path)
+    opened_doc = None
+    out_panel.print_md(u"**[{}/{}]** `{}`".format(idx, len(rvt_files), filename))
+
+    try:
+        # Converte caminho para ModelPath
+        model_path = ModelPathUtils.ConvertUserVisiblePathToModelPath(rvt_path)
+
+        # Opções de abertura: destacado do central, worksets fechados
+        open_opts = OpenOptions()
+        open_opts.DetachFromCentralOption = (
+            DetachFromCentralOption.DetachAndPreserveWorksets
+        )
+        try:
+            wsc = WorksetConfiguration(WorksetConfigurationOption.CloseAllWorksets)
+            open_opts.SetOpenWorksetsConfiguration(wsc)
+        except:
+            pass  # Projeto sem worksets — ok
+
+        opened_doc = app.OpenDocumentFile(model_path, open_opts)
+        mdl_title  = opened_doc.Title
+        mdl_safe   = (mdl_title
+                      .replace("/",  "_")
+                      .replace("\\", "_")
+                      .replace(":",  "_"))
+
+        if modo == "completo":
+            cnt, run_dir = extrair_completo(
+                opened_doc, mdl_title, mdl_safe, run_stamp, day, now)
+            resultados.append((filename, cnt, run_dir, None))
+            out_panel.print_md(
+                u"  &nbsp;&nbsp;✓ {} elementos extraídos".format(cnt))
+        else:
+            total_el, n_amb, assoc, run_dir = extrair_inventario(
+                opened_doc, mdl_title, mdl_safe, run_stamp, day, now)
+            resultados.append((filename, total_el, run_dir, n_amb))
+            out_panel.print_md(
+                u"  &nbsp;&nbsp;✓ {} elementos | {} ambiente(s)".format(
+                    total_el, n_amb))
+
+    except Exception as ex:
+        erros.append((filename, str(ex)))
+        out_panel.print_md(
+            u"  &nbsp;&nbsp;✗ **ERRO:** {}".format(str(ex)))
+
+    finally:
+        if opened_doc is not None:
+            try:
+                opened_doc.Close(False)   # Fecha sem salvar
+            except:
+                pass
+
+
+# ============================================================
+# RELATÓRIO FINAL NO PAINEL DE OUTPUT
+# ============================================================
+out_panel.print_md(u"---")
+out_panel.print_md(u"## Resultado Final")
+
+for filename, cnt, run_dir, n_amb in resultados:
+    if n_amb is not None:
+        out_panel.print_md(
+            u"- **{}** → {} elementos | {} ambiente(s)  \n"
+            u"  Pasta: `{}`".format(filename, cnt, n_amb, run_dir))
+    else:
+        out_panel.print_md(
+            u"- **{}** → {} elementos  \n"
+            u"  Pasta: `{}`".format(filename, cnt, run_dir))
+
+if erros:
+    out_panel.print_md(u"### Arquivos com Erro")
+    for filename, msg in erros:
+        out_panel.print_md(u"- **{}**: {}".format(filename, msg))
+
+out_panel.print_md(
+    u"---\n**Concluído:** {}/{} arquivo(s) com sucesso | {} erro(s)".format(
+        len(resultados), len(rvt_files), len(erros)
+    )
+)
+
+# ============================================================
+# POPUP DE ENCERRAMENTO
+# ============================================================
+linhas = [
+    u"Extração em Lote concluída!",
+    u"",
+    u"  Modo     : {}".format(modo_label),
+    u"  Arquivos : {}".format(len(rvt_files)),
+    u"  Sucesso  : {}".format(len(resultados)),
+    u"  Erros    : {}".format(len(erros)),
+    u"",
+    u"  Pasta de saída:",
+    u"  {}".format(os.path.join(BASE_DIR, ROOT_FOLDER_NAME)),
+]
+
+forms.alert(
+    u"\n".join(linhas),
+    title=u"Extração em Lote — Concluída",
+    warn_icon=(len(erros) > 0),
+)
