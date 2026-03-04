@@ -1,0 +1,5 @@
+title: Comparação de Layout
+tooltip: |
+  Ferramentas para comparar layouts no modelo Revit:
+  - Comparação de Folhas: identificar folhas sem elementos ou fora de folha
+  - Comparação de Disciplinas: elementos sem disciplina ou com disciplina incorreta
