@@ -101,18 +101,27 @@ class DialogSuppressor(object):
 
     def start(self):
         """Registra os handlers nos eventos da Application."""
-        self._app.DialogBoxShowing   += self._on_dialog
+        # IronPython 2: usa bare except para capturar excecoes .NET
+        # (System.MissingMemberException nao e capturada por 'except Exception')
+        self._has_dialog_event = False
+        if hasattr(self._app, "DialogBoxShowing"):
+            try:
+                self._app.DialogBoxShowing += self._on_dialog
+                self._has_dialog_event = True
+            except:
+                pass
         self._app.FailuresProcessing += self._on_failures
 
     def stop(self):
         """Remove os handlers. Sempre chame em um bloco finally."""
-        try:
-            self._app.DialogBoxShowing   -= self._on_dialog
-        except:
-            pass
+        if getattr(self, "_has_dialog_event", False):
+            try:
+                self._app.DialogBoxShowing -= self._on_dialog
+            except Exception:
+                pass
         try:
             self._app.FailuresProcessing -= self._on_failures
-        except:
+        except Exception:
             pass
 
     # -- interface context manager --------------------------------
