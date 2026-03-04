@@ -1,0 +1,21 @@
+title: Explorador de Elementos
+author: Emerson Rafael
+tooltip: |
+  Abre uma janela interativa para navegar pela hierarquia
+  completa de elementos do modelo Revit ativo.
+
+  Navegação em 4 painéis:
+  • Categorias → Famílias → Tipos → Instâncias
+
+  Ao clicar em cada nível, o painel seguinte é preenchido
+  automaticamente com os itens correspondentes.
+
+  Ao selecionar uma instância, o rodapé exibe:
+  • ID do elemento
+  • Categoria, Família e Tipo
+  • Nível / Pavimento
+  • Ambiente (Room / Space)
+  • Fase de Criação e Fase de Demolição
+  • Workset
+
+  Inclui breadcrumb de navegação e botão Limpar seleção.

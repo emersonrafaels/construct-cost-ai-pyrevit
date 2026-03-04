@@ -1,0 +1,14 @@
+Compara dois arquivos elements.csv gerados pela Extração Completa
+e identifica elementos Adicionados, Removidos e Alterados entre
+duas versões do modelo Revit.
+
+Como usar:
+  1. Clique no botão
+  2. Selecione o arquivo A (versão ANTERIOR) -- elements.csv
+  3. Selecione o arquivo B (versão ATUAL)    -- elements.csv
+  4. O relatório é exibido no painel de saída e salvo em:
+     Desktop/RevitScan/Comparadores/<carimbo>/
+       comparacao.csv
+       comparacao.json
+
+Campos comparados: category | family | type | level

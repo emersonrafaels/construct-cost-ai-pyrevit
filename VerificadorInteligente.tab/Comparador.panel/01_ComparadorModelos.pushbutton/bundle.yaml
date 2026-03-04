@@ -1,0 +1,18 @@
+title: Comparador de Modelos
+author: Emerson Rafael
+tooltip: |
+  Seleciona dois arquivos .rvt via explorer e compara os modelos
+  diretamente, sem necessidade de extrações prévias.
+
+  Abre cada arquivo desanexado do servidor central, extrai os
+  elementos em memória e gera o relatório de diferenças:
+
+  • Adicionados  — presentes em B mas não em A
+  • Removidos    — presentes em A mas não em B
+  • Alterados    — mesmo unique_id com campos diferentes
+  • Inalterados  — idênticos nos dois modelos
+
+  Campos comparados: category, family, type, level.
+
+  Saída: comparacao.csv + comparacao.json em
+  Desktop/RevitScan/Comparadores/<carimbo>/

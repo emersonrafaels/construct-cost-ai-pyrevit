@@ -399,17 +399,19 @@ for el in all_elements:
     except Exception:
         pass
 
-fam_counter = Counter({k: len(v) for k, v in family_map.items()})
-max_fam_qty = fam_counter.most_common(1)[0][1] if fam_counter else 1
+fam_counter  = Counter({k: len(v) for k, v in family_map.items()})
+total_fam_qty = sum(fam_counter.values())
+max_fam_qty  = fam_counter.most_common(1)[0][1] if fam_counter else 1
 
 fams_table = []
 for fam, qty in fam_counter.most_common(TOP_N):
+    pct       = round(qty * 100.0 / total_fam_qty, 1) if total_fam_qty else 0
     sample_id = family_map[fam][0] if family_map[fam] else None
     link      = output.linkify(sample_id) if sample_id else u"—"
-    fams_table.append([u8(fam), str(qty), bar(qty, max_fam_qty), link])
+    fams_table.append([u8(fam), str(qty), u"{}%".format(pct), bar(qty, max_fam_qty), link])
 
 if fams_table:
-    output.print_table(fams_table, columns=[u"Familia", u"Instancias", u"Distribuicao", u"Exemplo"])
+    output.print_table(fams_table, columns=[u"Familia", u"Instancias", u"%", u"Distribuicao", u"Exemplo"])
 else:
     output.print_md(u"_Nenhuma familia com instancias encontrada._")
 output.print_md(u"_Total: {} familias unicas com instancias_".format(len(fam_counter)))
@@ -452,17 +454,19 @@ for el in all_elements:
     except Exception:
         pass
 
-type_counter = Counter({k: len(v) for k, v in type_map.items()})
-max_type_qty = type_counter.most_common(1)[0][1] if type_counter else 1
+type_counter  = Counter({k: len(v) for k, v in type_map.items()})
+total_type_qty = sum(type_counter.values())
+max_type_qty  = type_counter.most_common(1)[0][1] if type_counter else 1
 
 types_table = []
 for label, qty in type_counter.most_common(TOP_N):
+    pct       = round(qty * 100.0 / total_type_qty, 1) if total_type_qty else 0
     sample_id = type_map[label][0] if type_map[label] else None
     link      = output.linkify(sample_id) if sample_id else u"—"
-    types_table.append([u8(label), str(qty), bar(qty, max_type_qty), link])
+    types_table.append([u8(label), str(qty), u"{}%".format(pct), bar(qty, max_type_qty), link])
 
 if types_table:
-    output.print_table(types_table, columns=[u"Familia : Tipo", u"Instancias", u"Distribuicao", u"Exemplo"])
+    output.print_table(types_table, columns=[u"Familia : Tipo", u"Instancias", u"%", u"Distribuicao", u"Exemplo"])
 else:
     output.print_md(u"_Nenhum tipo de familia com instancias encontrado._")
 output.print_md(u"_Total: {} tipos unicos com instancias_".format(len(type_counter)))
@@ -485,21 +489,24 @@ for sh in sheets:
 
 # Ordena por quantidade de vistas (decrescente)
 sheets_data.sort(key=lambda x: x[2], reverse=True)
-max_vp_qty = sheets_data[0][2] if sheets_data else 1
+max_vp_qty   = sheets_data[0][2] if sheets_data else 1
+total_vp_qty = sum(vp for _, _, vp, _ in sheets_data)
 
 sheets_table = []
 for number, name, vp_count, sh_id in sheets_data[:TOP_N]:
+    pct  = round(vp_count * 100.0 / total_vp_qty, 1) if total_vp_qty else 0
     link = output.linkify(sh_id)
     sheets_table.append([
         u8(number),
         u8(name),
         str(vp_count),
+        u"{}%".format(pct),
         bar(vp_count, max_vp_qty),
         link,
     ])
 
 if sheets_table:
-    output.print_table(sheets_table, columns=[u"Numero", u"Nome", u"Vistas", u"Distribuicao", u"Abrir"])
+    output.print_table(sheets_table, columns=[u"Numero", u"Nome", u"Vistas", u"%", u"Distribuicao", u"Abrir"])
 else:
     output.print_md(u"_Nenhuma folha encontrada no modelo._")
 output.print_md(u"_Total de folhas: {}_".format(len(sheets)))
@@ -518,13 +525,14 @@ for v in all_views:
     except Exception:
         pass
 
-max_vt_qty = view_type_counter.most_common(1)[0][1] if view_type_counter else 1
+max_vt_qty   = view_type_counter.most_common(1)[0][1] if view_type_counter else 1
+total_vt_qty = sum(view_type_counter.values())
 vt_table = [
-    [u8(vt), str(cnt), bar(cnt, max_vt_qty)]
+    [u8(vt), str(cnt), u"{}%".format(round(cnt * 100.0 / total_vt_qty, 1) if total_vt_qty else 0), bar(cnt, max_vt_qty)]
     for vt, cnt in view_type_counter.most_common()
 ]
 if vt_table:
-    output.print_table(vt_table, columns=[u"Tipo de Vista", u"Quantidade", u"Distribuicao"])
+    output.print_table(vt_table, columns=[u"Tipo de Vista", u"Quantidade", u"%", u"Distribuicao"])
 else:
     output.print_md(u"_Nenhuma vista encontrada._")
 output.print_md(u"_Total de vistas: {}_".format(len(all_views)))
@@ -616,12 +624,13 @@ if warnings:
             desc = u"(erro ao ler descricao)"
         warn_counter[desc] += 1
 
+    total_warn_qty = len(warnings)
     warn_table = [
-        [u8(desc), str(cnt)]
+        [u8(desc), str(cnt), u"{}%".format(round(cnt * 100.0 / total_warn_qty, 1) if total_warn_qty else 0)]
         for desc, cnt in warn_counter.most_common(TOP_N)
     ]
     if warn_table:
-        output.print_table(warn_table, columns=[u"Descricao do Alerta", u"Ocorrencias"])
+        output.print_table(warn_table, columns=[u"Descricao do Alerta", u"Ocorrencias", u"%"])
     output.print_md(u"_Total de alertas: {}_".format(len(warnings)))
 else:
     warn_counter = Counter()

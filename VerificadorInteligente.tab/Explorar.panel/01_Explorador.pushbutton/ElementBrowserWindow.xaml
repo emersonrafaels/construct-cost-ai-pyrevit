@@ -1,0 +1,452 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Explorador de Elementos"
+        Width="1100" Height="720"
+        MinWidth="860" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="#F0F2F5">
+
+  <Window.Resources>
+
+    <!-- Cor de destaque -->
+    <SolidColorBrush x:Key="AccentBrush"  Color="#2563EB"/>
+    <SolidColorBrush x:Key="HeaderBrush"  Color="#1E293B"/>
+    <SolidColorBrush x:Key="PanelBg"      Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="AltRow"        Color="#F8FAFC"/>
+    <SolidColorBrush x:Key="BorderColor"   Color="#CBD5E1"/>
+    <SolidColorBrush x:Key="TextMain"      Color="#1E293B"/>
+    <SolidColorBrush x:Key="TextMuted"     Color="#64748B"/>
+    <SolidColorBrush x:Key="TagBg"         Color="#DBEAFE"/>
+    <SolidColorBrush x:Key="TagFg"         Color="#1D4ED8"/>
+
+    <!-- Container de cada coluna de navegacao -->
+    <Style x:Key="NavPanel" TargetType="Border">
+      <Setter Property="Background"       Value="{StaticResource PanelBg}"/>
+      <Setter Property="BorderBrush"      Value="{StaticResource BorderColor}"/>
+      <Setter Property="BorderThickness"  Value="1"/>
+      <Setter Property="CornerRadius"     Value="8"/>
+      <Setter Property="Margin"           Value="4,0"/>
+    </Style>
+
+    <!-- Cabecalho de coluna -->
+    <Style x:Key="ColHeader" TargetType="Border">
+      <Setter Property="Background"      Value="{StaticResource HeaderBrush}"/>
+      <Setter Property="CornerRadius"    Value="7,7,0,0"/>
+      <Setter Property="Padding"         Value="12,8"/>
+    </Style>
+
+    <!-- Texto do cabecalho da coluna -->
+    <Style x:Key="ColHeaderText" TargetType="TextBlock">
+      <Setter Property="Foreground"   Value="White"/>
+      <Setter Property="FontWeight"   Value="SemiBold"/>
+      <Setter Property="FontSize"     Value="12"/>
+    </Style>
+
+    <!-- Badge de contagem -->
+    <Style x:Key="CountBadge" TargetType="Border">
+      <Setter Property="Background"      Value="{StaticResource AccentBrush}"/>
+      <Setter Property="CornerRadius"    Value="10"/>
+      <Setter Property="Padding"         Value="6,1"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin"          Value="6,0,0,0"/>
+    </Style>
+
+    <!-- ListBox limpo -->
+    <Style x:Key="NavList" TargetType="ListBox">
+      <Setter Property="Background"         Value="Transparent"/>
+      <Setter Property="BorderThickness"    Value="0"/>
+      <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+      <Setter Property="Padding"            Value="4"/>
+      <Style.Resources>
+        <Style TargetType="ListBoxItem">
+          <Setter Property="Padding"         Value="10,6"/>
+          <Setter Property="Margin"          Value="0,1"/>
+          <Setter Property="Background"      Value="Transparent"/>
+          <Setter Property="Cursor"          Value="Hand"/>
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ListBoxItem">
+                <Border x:Name="Bd"
+                        Background="{TemplateBinding Background}"
+                        BorderThickness="0"
+                        CornerRadius="5"
+                        Padding="{TemplateBinding Padding}">
+                  <ContentPresenter/>
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Bd" Property="Background" Value="#EFF6FF"/>
+                  </Trigger>
+                  <Trigger Property="IsSelected" Value="True">
+                    <Setter TargetName="Bd" Property="Background" Value="#DBEAFE"/>
+                    <Setter Property="Foreground"                  Value="#1D4ED8"/>
+                  </Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Style>
+      </Style.Resources>
+    </Style>
+
+    <!-- Linha de detalhe -->
+    <Style x:Key="DetailLabel" TargetType="TextBlock">
+      <Setter Property="Foreground"   Value="{StaticResource TextMuted}"/>
+      <Setter Property="FontSize"     Value="11"/>
+      <Setter Property="Margin"       Value="0,0,6,0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Width"        Value="110"/>
+    </Style>
+    <Style x:Key="DetailValue" TargetType="TextBlock">
+      <Setter Property="Foreground"   Value="{StaticResource TextMain}"/>
+      <Setter Property="FontSize"     Value="11"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+  </Window.Resources>
+
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>   <!-- Cabecalho modelo -->
+      <RowDefinition Height="Auto"/>   <!-- Breadcrumb -->
+      <RowDefinition Height="*"/>      <!-- Listas de navegacao -->
+      <RowDefinition Height="Auto"/>   <!-- Painel de detalhes -->
+    </Grid.RowDefinitions>
+
+    <!-- ===== CABECALHO ===== -->
+    <Border Grid.Row="0"
+            Background="{StaticResource HeaderBrush}"
+            CornerRadius="10"
+            Padding="16,12"
+            Margin="0,0,0,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" Orientation="Vertical">
+          <TextBlock x:Name="lblModelo"
+                     Text="Modelo"
+                     Foreground="White"
+                     FontSize="15"
+                     FontWeight="Bold"/>
+          <TextBlock x:Name="lblInfo"
+                     Text=""
+                     Foreground="#94A3B8"
+                     FontSize="11"
+                     Margin="0,2,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Style="{StaticResource CountBadge}" Margin="4,0">
+            <TextBlock x:Name="badgeCat" Text="0 cat." Foreground="White" FontSize="11"/>
+          </Border>
+          <Border Style="{StaticResource CountBadge}" Margin="4,0">
+            <TextBlock x:Name="badgeFam" Text="0 fam." Foreground="White" FontSize="11"/>
+          </Border>
+          <Border Style="{StaticResource CountBadge}" Margin="4,0">
+            <TextBlock x:Name="badgeInst" Text="0 inst." Foreground="White" FontSize="11"/>
+          </Border>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- ===== BREADCRUMB ===== -->
+    <Border Grid.Row="1"
+            Background="White"
+            BorderBrush="{StaticResource BorderColor}"
+            BorderThickness="1"
+            CornerRadius="6"
+            Padding="12,6"
+            Margin="0,0,0,8">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0"
+                   Text="📍 "
+                   FontSize="12"
+                   VerticalAlignment="Center"/>
+        <TextBlock x:Name="lblBreadcrumb"
+                   Grid.Column="1"
+                   Text="Selecione uma categoria"
+                   Foreground="{StaticResource TextMuted}"
+                   FontSize="12"
+                   VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis"/>
+        <Button x:Name="btnLimpar"
+                Grid.Column="2"
+                Content="✕ Limpar"
+                Padding="10,3"
+                FontSize="11"
+                Cursor="Hand"
+                Background="#F1F5F9"
+                BorderBrush="{StaticResource BorderColor}"
+                BorderThickness="1"
+                Foreground="{StaticResource TextMuted}">
+          <Button.Template>
+            <ControlTemplate TargetType="Button">
+              <Border Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}"
+                      CornerRadius="4"
+                      Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter Property="Background" Value="#E2E8F0"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Button.Template>
+        </Button>
+      </Grid>
+    </Border>
+
+    <!-- ===== 4 PAINEIS DE NAVEGACAO ===== -->
+    <Grid Grid.Row="2" Margin="0,0,0,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <!-- CATEGORIAS -->
+      <Border Grid.Column="0" Style="{StaticResource NavPanel}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Style="{StaticResource ColHeader}">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Categorias" Style="{StaticResource ColHeaderText}"/>
+              <Border Style="{StaticResource CountBadge}">
+                <TextBlock x:Name="cntCat" Text="0" Foreground="White" FontSize="10"/>
+              </Border>
+            </StackPanel>
+          </Border>
+          <ListBox x:Name="lstCategorias" Grid.Row="1" Style="{StaticResource NavList}">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Orientation="Vertical">
+                  <TextBlock Text="{Binding Name}"
+                             FontSize="12" FontWeight="Medium"
+                             Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                  <TextBlock Text="{Binding Count}"
+                             FontSize="10"
+                             Foreground="{StaticResource TextMuted}"/>
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <TextBlock x:Name="hintCat" Grid.Row="2"
+                     Text="← clique para filtrar"
+                     Foreground="{StaticResource TextMuted}"
+                     FontSize="10" Padding="10,4"
+                     HorizontalAlignment="Center"/>
+        </Grid>
+      </Border>
+
+      <!-- FAMILIAS -->
+      <Border Grid.Column="1" Style="{StaticResource NavPanel}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Style="{StaticResource ColHeader}">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Famílias" Style="{StaticResource ColHeaderText}"/>
+              <Border Style="{StaticResource CountBadge}">
+                <TextBlock x:Name="cntFam" Text="0" Foreground="White" FontSize="10"/>
+              </Border>
+            </StackPanel>
+          </Border>
+          <ListBox x:Name="lstFamilias" Grid.Row="1" Style="{StaticResource NavList}">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Orientation="Vertical">
+                  <TextBlock Text="{Binding Name}"
+                             FontSize="12" FontWeight="Medium"
+                             TextWrapping="Wrap"
+                             Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                  <TextBlock Text="{Binding Count}"
+                             FontSize="10"
+                             Foreground="{StaticResource TextMuted}"/>
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <TextBlock x:Name="hintFam" Grid.Row="2"
+                     Text="Selecione uma categoria"
+                     Foreground="{StaticResource TextMuted}"
+                     FontSize="10" Padding="10,4"
+                     HorizontalAlignment="Center"/>
+        </Grid>
+      </Border>
+
+      <!-- TIPOS -->
+      <Border Grid.Column="2" Style="{StaticResource NavPanel}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Style="{StaticResource ColHeader}">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Tipos" Style="{StaticResource ColHeaderText}"/>
+              <Border Style="{StaticResource CountBadge}">
+                <TextBlock x:Name="cntTip" Text="0" Foreground="White" FontSize="10"/>
+              </Border>
+            </StackPanel>
+          </Border>
+          <ListBox x:Name="lstTipos" Grid.Row="1" Style="{StaticResource NavList}">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Orientation="Vertical">
+                  <TextBlock Text="{Binding Name}"
+                             FontSize="12" FontWeight="Medium"
+                             TextWrapping="Wrap"
+                             Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                  <TextBlock Text="{Binding Count}"
+                             FontSize="10"
+                             Foreground="{StaticResource TextMuted}"/>
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <TextBlock x:Name="hintTip" Grid.Row="2"
+                     Text="Selecione uma família"
+                     Foreground="{StaticResource TextMuted}"
+                     FontSize="10" Padding="10,4"
+                     HorizontalAlignment="Center"/>
+        </Grid>
+      </Border>
+
+      <!-- INSTANCIAS -->
+      <Border Grid.Column="3" Style="{StaticResource NavPanel}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border Grid.Row="0" Style="{StaticResource ColHeader}">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Instâncias" Style="{StaticResource ColHeaderText}"/>
+              <Border Style="{StaticResource CountBadge}">
+                <TextBlock x:Name="cntInst" Text="0" Foreground="White" FontSize="10"/>
+              </Border>
+            </StackPanel>
+          </Border>
+          <ListBox x:Name="lstInstancias" Grid.Row="1" Style="{StaticResource NavList}">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Orientation="Vertical">
+                  <TextBlock Text="{Binding Name}"
+                             FontSize="11" FontWeight="Medium"
+                             Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"/>
+                  <TextBlock Text="{Binding Sub}"
+                             FontSize="10"
+                             Foreground="{StaticResource TextMuted}"
+                             TextWrapping="Wrap"/>
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+          <TextBlock x:Name="hintInst" Grid.Row="2"
+                     Text="Selecione um tipo"
+                     Foreground="{StaticResource TextMuted}"
+                     FontSize="10" Padding="10,4"
+                     HorizontalAlignment="Center"/>
+        </Grid>
+      </Border>
+    </Grid>
+
+    <!-- ===== PAINEL DE DETALHES DA INSTANCIA ===== -->
+    <Border Grid.Row="3"
+            Background="White"
+            BorderBrush="{StaticResource BorderColor}"
+            BorderThickness="1"
+            CornerRadius="8"
+            Padding="16,12">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="Detalhes da Instância Selecionada"
+                   FontSize="12" FontWeight="SemiBold"
+                   Foreground="{StaticResource TextMuted}"
+                   Margin="0,0,0,8"/>
+
+        <Grid Grid.Row="1" x:Name="pnlDetalhes">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+
+          <!-- Coluna 1 -->
+          <StackPanel Grid.Column="0" Orientation="Vertical">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="ID do Elemento:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dId" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Categoria:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dCat" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Família:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dFam" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+          </StackPanel>
+
+          <!-- Coluna 2 -->
+          <StackPanel Grid.Column="1" Orientation="Vertical">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Tipo:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dTip" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Nível / Pavimento:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dLevel" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Ambiente (Room):" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dRoom" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+          </StackPanel>
+
+          <!-- Coluna 3 -->
+          <StackPanel Grid.Column="2" Orientation="Vertical">
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Fase de Criação:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dPhaseC" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Fase Demolição:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dPhaseD" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <TextBlock Text="Workset:" Style="{StaticResource DetailLabel}"/>
+              <TextBlock x:Name="dWorkset" Text="—" Style="{StaticResource DetailValue}"/>
+            </StackPanel>
+          </StackPanel>
+        </Grid>
+      </Grid>
+    </Border>
+
+  </Grid>
+</Window>

@@ -1,543 +1,780 @@
-# -*- coding: utf-8 -*-
-
+﻿# -*- coding: utf-8 -*-
 # ============================================================
-# CONTEXTO RAPIDO PARA QUEM NAO CONHECE REVIT
+# VALIDADOR DE LAYOUT -- AGENCIA BANCARIA
 # ============================================================
-# Este script e um DIAGNOSTICO COMPLETO do modelo Revit aberto.
-# Ele demonstra APIs do Revit que NAO foram usadas nos demais scripts:
+# Executa verificacoes automatizadas de layout, estilo e
+# conformidade para projetos de agencia bancaria no Revit.
 #
-#   - ProjectInfo        : metadados do projeto (cliente, end., autor...)
-#   - __revit__.Application : versao do Revit em uso
-#   - Level              : pavimentos / niveis com elevacao
-#   - FilteredWorksetCollector : worksets (conjuntos de trabalho BIM colaborativo)
-#   - doc.GetWarnings()  : alertas/inconsistencias do modelo
-#   - RevitLinkInstance  : modelos Revit linkados (RVT externos)
-#   - doc.Phases         : fases de construcao do projeto
-#   - DesignOption       : opcoes de projeto (variantes de layout)
-#   - script.get_output(): painel de saida HTML rico do pyRevit (NOVO)
-#   - output.print_table(): tabela renderizada em HTML no painel pyRevit
-#   - output.print_md()  : renderiza Markdown no painel pyRevit
-#   - output.linkify()   : gera link clicavel para um elemento no Revit
+# Validacoes realizadas:
+#   1.  Informacoes do Projeto
+#   2.  Inventario de Ambientes (Rooms / Spaces)
+#   3.  Checklist de Ambientes Obrigatorios
+#   4.  Acessibilidade -- NBR 9050
+#         * Largura de portas (>= 0,80 m)
+#         * Areas acessiveis identificadas no modelo
+#   5.  Areas Minimas por Ambiente
+#   6.  Pe-direito (altura livre) por Ambiente
+#   7.  Seguranca
+#         * Cabine/cilindro de seguranca
+#         * Cofre / sala-forte
+#         * Saidas de emergencia
+#   8.  Nomenclatura Padronizada
+#   9.  Alertas do Modelo (Warnings Revit)
+#  10.  Pontuacao / Score Geral
 #
-# Alem do painel HTML, gera um JSON de "fingerprint" do modelo —
-# util para comparar versoes do modelo ao longo do tempo.
+# Arquivos gerados:
+#   validacao_agencia.json  -- snapshot completo das validacoes
+#   relatorio_validacao.csv -- resumo das pendencias
+#
+# Compativel com Revit 2022-2026  |  IronPython 2 / CPython 3
 # ============================================================
 
-from pyrevit import revit, script   # script: modulo do painel de saida HTML
+from pyrevit import revit, script
+
 from Autodesk.Revit.DB import (
     FilteredElementCollector,
-    FilteredWorksetCollector,       # Coleta worksets (novo)
-    WorksetKind,                    # Enum para filtrar por tipo de workset
-    Level,                          # Classe de niveis/pavimentos (novo)
-    RevitLinkInstance,              # Modelos RVT linkados (novo)
-    DesignOption,                   # Opcoes de projeto (novo)
-    UnitUtils,                      # Conversao de unidades internas do Revit (novo)
-    UnitTypeId,                     # Identificadores de tipo de unidade (Revit 2022+)
+    BuiltInCategory,
+    BuiltInParameter,
+    Level,
+    Wall,
+    SpatialElement,
 )
-from collections import Counter, OrderedDict
-import csv, os, datetime, json
+from Autodesk.Revit.DB.Architecture import Room
 
-# --------------------------------------------------------
-# doc  = modelo aberto no Revit
-# app  = objeto Application do Revit (versao, idioma, etc.)
-# __revit__ e injetado automaticamente pelo pyRevit no escopo do script
-# --------------------------------------------------------
-doc = revit.doc
-app = __revit__.Application  # Objeto principal do Revit (novo — nao usado antes)
+try:
+    from Autodesk.Revit.DB import UnitUtils, UnitTypeId
+    _HAS_UNIT = True
+except ImportError:
+    _HAS_UNIT = False
 
-# =========================================
-# PARAMS (AJUSTE AQUI)
-# =========================================
+from collections import Counter, defaultdict
+import os, csv, datetime, json, sys
+
+# ============================================================
+# CONFIGURACOES -- AJUSTE PARA O PROJETO
+# ============================================================
 BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
 ROOT_FOLDER_NAME = "RevitScan"
-PLUGIN_NAME      = "TestAPI"
-TOP_N_CATS       = 20  # Quantas categorias exibir no ranking
-# =========================================
+PLUGIN_NAME      = "ValidadorAgencia"
+
+# ---------- LIMITES NBR 9050 / BOAS PRATICAS BANCARIAS ------
+PORTA_ACESSIVEL_MIN_M  = 0.80
+PORTA_PRINCIPAL_MIN_M  = 0.90
+PE_DIREITO_MIN_M       = 2.50
+PE_DIREITO_HALL_MIN_M  = 3.00
+AREA_MIN_SALA_M2       = 9.0
+AREA_MIN_ESPERA_M2     = 15.0
+AREA_MIN_CAIXA_M2      = 12.0
+AREA_MIN_COFRE_M2      = 6.0
+AREA_MIN_GERENTE_M2    = 8.0
+AREA_MIN_BANHEIRO_M2   = 3.50
+
+# ---------- PALAVRAS-CHAVE PARA IDENTIFICACAO DE AMBIENTES --
+KW_ESPERA    = [u"ESPERA", u"LOBBY", u"HALL", u"RECEPCAO", u"AGUARDO"]
+KW_CAIXA     = [u"CAIXA", u"TELLER", u"ATENDIMENTO", u"OPERACAO"]
+KW_GERENTE   = [u"GERENTE", u"GERENCIA", u"REUNIAO", u"DIRETORIA"]
+KW_COFRE     = [u"COFRE", u"SALA FORTE", u"SALA-FORTE", u"TESOURARIA", u"VAULT"]
+KW_SEGURANCA = [u"SEGURANCA", u"CILINDRO", u"CABINE", u"GUARITA", u"CONTROLE"]
+KW_ATM       = [u"ATM", u"CAIXA ELETRONICO", u"AUTOATENDIMENTO", u"SELF SERVICE"]
+KW_BANHEIRO  = [u"BANHEIRO", u"SANITARIO", u"WC", u"LAVABO", u"TOILET"]
+KW_ACESSIVEL = [u"ACESSIVEL", u"ACESSIBILIDADE", u"PNE", u"DEFICIENTE"]
+KW_SAIDA     = [u"SAIDA", u"EMERGENCIA", u"ROTA FUGA", u"EVACUACAO"]
+KW_TI        = [u"TI", u"SERVIDOR", u"TELECOMUNICACAO", u"RACK", u"DATACENTER"]
+
+AMBIENTES_OBRIGATORIOS = [
+    (u"Hall / Espera",         KW_ESPERA),
+    (u"Area de Caixas",        KW_CAIXA),
+    (u"Sala de Gerente",       KW_GERENTE),
+    (u"Cofre / Sala-Forte",    KW_COFRE),
+    (u"Seguranca / Cabine",    KW_SEGURANCA),
+    (u"ATM / Autoatendimento", KW_ATM),
+    (u"Banheiro",              KW_BANHEIRO),
+    (u"TI / Servidores",       KW_TI),
+]
+# ============================================================
+
+doc = revit.doc
+app = __revit__.Application
 
 now       = datetime.datetime.now()
-ts        = now.strftime("%H%M%S")
-day       = now.strftime("%Y-%m-%d")
 run_stamp = now.strftime("%Y-%m-%d_%H%M%S")
+model     = doc.Title
+model_safe= model.replace("/", "_").replace("\\", "_").replace(":", "_")
 
-model      = doc.Title
-model_safe = model.replace("/", "_").replace("\\", "_").replace(":", "_")
-
-ROOT_DIR = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
-
-# Pasta com carimbo de data/hora (historico permanente).
-RUN_DIR = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
-if not os.path.exists(RUN_DIR):
-    os.makedirs(RUN_DIR)
-
-# Pasta "latest" (sempre sobrescrita).
+ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+RUN_DIR    = os.path.join(ROOT_DIR, model_safe, PLUGIN_NAME, run_stamp)
 LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", PLUGIN_NAME)
-if not os.path.exists(LATEST_DIR):
-    os.makedirs(LATEST_DIR)
-
-# Caminhos de saida
-out_cats        = os.path.join(RUN_DIR, "categorias.csv")
-out_cats_lat    = os.path.join(LATEST_DIR, "categorias.csv")
-out_fingerprint = os.path.join(RUN_DIR, "model_fingerprint.json")
-out_fp_lat      = os.path.join(LATEST_DIR, "model_fingerprint.json")
+for _d in [RUN_DIR, LATEST_DIR]:
+    if not os.path.exists(_d):
+        os.makedirs(_d)
 
 
 # ============================================================
-# FUNCOES AUXILIARES
+# UTILITARIOS
 # ============================================================
+try:
+    _unicode = unicode
+except NameError:
+    _unicode = str
+
 
 def u8(x):
-    """
-    Garante que o valor seja uma string unicode pura.
-    Em IronPython 2, strings da API do Revit podem chegar como bytes (str)
-    com encoding UTF-8 ou Latin-1. Retornar unicode evita mojibake no painel
-    HTML do pyRevit (ex: 'LuminÃ¡rias' -> 'Luminárias').
-    """
     if x is None:
         return u""
-    if isinstance(x, unicode):
+    if isinstance(x, _unicode):
         return x
-    if isinstance(x, (str, bytes)):
-        try:
-            return x.decode("utf-8")
-        except (UnicodeDecodeError, AttributeError):
+    if isinstance(x, (bytes,)):
+        for enc in ("utf-8", "latin-1"):
             try:
-                return x.decode("latin-1")
+                return x.decode(enc)
             except (UnicodeDecodeError, AttributeError):
-                return u""
-    try:
-        return unicode(x)
-    except:
+                continue
         return u""
+    try:
+        return _unicode(x)
+    except Exception:
+        return u""
+
+
+def eid_int(eid):
+    try:
+        return eid.Value
+    except AttributeError:
+        return eid.IntegerValue
+
+
+def sqft_to_sqm(sqft):
+    try:
+        if _HAS_UNIT:
+            return round(UnitUtils.ConvertFromInternalUnits(sqft, UnitTypeId.SquareMeters), 2)
+        return round(sqft * 0.092903, 2)
+    except Exception:
+        return 0.0
+
+
+def ft_to_m(ft):
+    try:
+        if _HAS_UNIT:
+            return round(UnitUtils.ConvertFromInternalUnits(ft, UnitTypeId.Meters), 3)
+        return round(ft * 0.3048, 3)
+    except Exception:
+        return 0.0
+
+
+def match_kw(name, keywords):
+    name_up = u8(name).upper()
+    return any(kw in name_up for kw in keywords)
+
+
+def status_icon(ok):
+    return u"OK" if ok else u"ATENCAO"
+
+
+def normalize_json(obj):
+    if isinstance(obj, dict):
+        return {normalize_json(k): normalize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [normalize_json(v) for v in obj]
+    if isinstance(obj, _unicode):
+        return obj
+    if isinstance(obj, (str, bytes)):
+        for enc in ("utf-8", "latin-1"):
+            try:
+                return obj.decode(enc)
+            except (UnicodeDecodeError, AttributeError):
+                continue
+        return u""
+    return obj
 
 
 def write_bom_csv(path):
-    """Abre CSV em binario com BOM UTF-8 para compatibilidade com Excel."""
+    if sys.version_info[0] >= 3:
+        return open(path, "w", encoding="utf-8-sig", newline="")
     f = open(path, "wb")
-    f.write(u"\ufeff".encode("utf-8"))
+    f.write(b"\xef\xbb\xbf")
     return f
 
 
-def safe_str(x):
-    """Retorna unicode string ou '' se None.
-    Em IronPython, strings da API do Revit podem chegar como bytes (str),
-    causando UnicodeDecodeError no json.dumps. Esta funcao garante unicode.
-    """
-    if not x:
-        return u""
-    if isinstance(x, unicode):
-        return x
-    # byte string: tenta decodificar como utf-8, depois latin-1
-    try:
-        return x.decode("utf-8")
-    except (UnicodeDecodeError, AttributeError):
+def csv_row(*cols):
+    if sys.version_info[0] >= 3:
+        return [u8(c) for c in cols]
+    return [u8(c).encode("utf-8") for c in cols]
+
+
+def save_json(obj, *paths):
+    for path in paths:
         try:
-            return x.decode("latin-1")
-        except (UnicodeDecodeError, AttributeError):
-            return unicode(x)
+            safe = normalize_json(obj)
+            blob = json.dumps(safe, indent=2, ensure_ascii=True)
+            if isinstance(blob, _unicode):
+                blob = blob.encode("utf-8")
+            with open(path, "wb") as jf:
+                jf.write(blob)
+        except Exception as ex:
+            with open(path, "wb") as jf:
+                jf.write((u'{"error": "' + u8(str(ex)) + u'"}').encode("utf-8"))
 
 
-def to_meters(internal_value):
-    """
-    Converte um valor de comprimento das unidades internas do Revit (pes decimais)
-    para metros. Util para exibir elevacoes de niveis de forma legivel.
-    A API do Revit armazena distancias em pes internos (feet),
-    independente das configuracas de unidade do usuario.
-    """
+def rname(r):
+    """Retorna o nome do Room de forma segura via parametro BuiltIn."""
     try:
-        return round(
-            UnitUtils.ConvertFromInternalUnits(
-                internal_value, UnitTypeId.Meters
-            ), 3
-        )
-    except:
-        return internal_value
+        p = r.get_Parameter(BuiltInParameter.ROOM_NAME)
+        if p:
+            return u8(p.AsString())
+    except Exception:
+        pass
+    try:
+        return u8(r.Name)
+    except Exception:
+        return u""
+
+
+def rnumber(r):
+    """Retorna o numero do Room de forma segura via parametro BuiltIn."""
+    try:
+        p = r.get_Parameter(BuiltInParameter.ROOM_NUMBER)
+        if p:
+            return u8(p.AsString())
+    except Exception:
+        pass
+    try:
+        return u8(r.Number)
+    except Exception:
+        return u""
+
+
+def rlevel(r):
+    """Retorna o nome do Level do Room de forma segura."""
+    try:
+        lv = r.Level
+        if lv:
+            return u8(lv.Name)
+    except Exception:
+        pass
+    return u"--"
 
 
 # ============================================================
-# INICIALIZA O PAINEL DE SAIDA RICO DO PYREVIT (NOVO)
+# INICIALIZA PAINEL HTML
 # ============================================================
-# script.get_output() retorna um objeto que renderiza HTML no painel
-# lateral do pyRevit — muito mais rico que print() no console.
-# Permite tabelas, Markdown, links clicaveis para elementos, etc.
 output = script.get_output()
-output.set_height(800)                        # Altura do painel em pixels
-output.set_title("TestAPI — Diagnostico do Modelo")  # Titulo da aba
+output.set_height(960)
+output.set_title(u"Validador Agencia -- " + u8(model))
 
-output.print_md("# Diagnostico do Modelo Revit")
-output.print_md("**Modelo:** `{}`  \n**Execucao:** `{}`".format(model, run_stamp))
+output.print_md(u"# Validador de Layout -- Agencia Bancaria")
+output.print_md(
+    u"**Modelo:** `{}`  \n**Execucao:** `{}`  \n**Revit:** {} ({})".format(
+        u8(model), run_stamp,
+        u8(str(app.VersionNumber)), u8(str(app.VersionName))
+    )
+)
 
-
-# ============================================================
-# 1. INFORMACOES DO PROJETO (ProjectInfo — NOVO)
-# ============================================================
-# doc.ProjectInformation retorna o objeto ProjectInfo com metadados
-# definidos em Revit > Gerenciar > Informacoes do Projeto.
-output.print_md("---\n## 1. Informacoes do Projeto")
-
-proj = doc.ProjectInformation
-
-proj_fields = OrderedDict([
-    ("Nome do Projeto",  safe_str(proj.Name)),
-    ("Numero",           safe_str(proj.Number)),
-    ("Cliente",          safe_str(proj.ClientName)),
-    ("Endereco",         safe_str(proj.Address)),
-    ("Status",           safe_str(proj.Status)),
-    ("Autor",            safe_str(proj.Author)),
-    ("Data da Emissao",  safe_str(proj.IssueDate)),
-])
-
-proj_table = [[k, v] for k, v in proj_fields.items()]
-output.print_table(proj_table, columns=["Campo", "Valor"])
+# Contadores de score
+total_checks  = 0
+passed_checks = 0
+pendencias    = []
 
 
-# ============================================================
-# 2. VERSAO DO REVIT (Application — NOVO)
-# ============================================================
-# __revit__.Application expoe informacoes do executavel do Revit,
-# nao do documento. Util para logs de compatibilidade.
-output.print_md("---\n## 2. Versao do Revit")
-
-app_info = OrderedDict([
-    ("Versao",    str(app.VersionNumber)),
-    ("Nome",      str(app.VersionName)),
-    ("Build",     str(app.VersionBuild)),
-    ("Idioma",    str(app.Language)),
-])
-
-app_table = [[k, v] for k, v in app_info.items()]
-output.print_table(app_table, columns=["Campo", "Valor"])
+def register(ok, categoria, descricao, detalhe=u""):
+    global total_checks, passed_checks
+    total_checks  += 1
+    if ok:
+        passed_checks += 1
+    else:
+        pendencias.append({
+            "categoria": u8(categoria),
+            "descricao": u8(descricao),
+            "detalhe":   u8(detalhe),
+            "status":    u"ATENCAO",
+        })
+    return ok
 
 
 # ============================================================
-# 3. NIVEIS / PAVIMENTOS (Level — NOVO)
+# COLETA PRINCIPAL
 # ============================================================
-# Level representa pavimentos do edificio (Terreo, 1o Andar, Cobertura...).
-# A elevacao e armazenada em pes internos e convertida para metros aqui.
-output.print_md("---\n## 3. Niveis / Pavimentos")
+all_rooms = [
+    r for r in FilteredElementCollector(doc)
+        .OfCategory(BuiltInCategory.OST_Rooms)
+        .WhereElementIsNotElementType()
+        .ToElements()
+    if isinstance(r, Room) and r.Area > 0
+]
+
+all_doors = list(
+    FilteredElementCollector(doc)
+    .OfCategory(BuiltInCategory.OST_Doors)
+    .WhereElementIsNotElementType()
+    .ToElements()
+)
+
+all_walls = list(FilteredElementCollector(doc).OfClass(Wall).ToElements())
 
 levels = sorted(
     FilteredElementCollector(doc).OfClass(Level).ToElements(),
-    key=lambda lv: lv.Elevation  # Ordena do mais baixo para o mais alto
+    key=lambda lv: lv.Elevation
 )
 
-levels_table = []
-for lv in levels:
-    elev_m = to_meters(lv.Elevation)
-    levels_table.append([
-        u8(lv.Name),
-        "{} m".format(elev_m),
-        u8(lv.Id.ToString()),
-    ])
-
-output.print_table(levels_table, columns=["Nome", "Elevacao", "ID"])
-output.print_md("_Total: {} niveis_".format(len(levels)))
-
-
-# ============================================================
-# 4. WORKSETS (FilteredWorksetCollector — NOVO)
-# ============================================================
-# Worksets sao conjuntos de trabalho usados em modelos COLABORATIVOS
-# (arquivo central / modelos locais). Se o modelo nao e workshared,
-# essa coleta retorna lista vazia.
-output.print_md("---\n## 4. Worksets (Conjuntos de Trabalho)")
-
-worksets_info = []
+model_warnings = []
 try:
-    if doc.IsWorkshared:
-        wsets = FilteredWorksetCollector(doc).OfKind(WorksetKind.UserWorkset).ToWorksets()
-        for ws in wsets:
-            # Conta quantos elementos pertencem a este workset.
-            # WorksetId e usado como filtro.
-            ws_elements = FilteredElementCollector(doc) \
-                .WhereElementIsNotElementType() \
-                .ToElements()
-            count = sum(
-                1 for el in ws_elements
-                if el.WorksetId and el.WorksetId.IntegerValue == ws.Id.IntegerValue
-            )
-            worksets_info.append([
-                u8(ws.Name),
-                u8(ws.Owner) if ws.Owner else "(aberto)",
-                str(count),
-                "Aberto" if ws.IsOpen else "Fechado",
-                u8(str(ws.Id)),
-            ])
-        output.print_table(worksets_info, columns=["Workset", "Proprietario", "Elementos", "Estado", "ID"])
-    else:
-        output.print_md("_Modelo nao e workshared (sem worksets de usuario)._")
-except Exception as e:
-    output.print_md("_Erro ao ler worksets: {}_".format(str(e)))
-
-
-# ============================================================
-# 5. ALERTAS DO MODELO (doc.GetWarnings() — NOVO)
-# ============================================================
-# O Revit registra inconsistencias autodetectadas como "Warnings" (alertas).
-# Exemplos: paredes sobrepostas, elementos duplicados, rooms nao fechados.
-# GetWarnings() retorna todos os alertas ativos no modelo.
-output.print_md("---\n## 5. Alertas do Modelo (Warnings)")
-
-warnings = []
-try:
-    warnings = list(doc.GetWarnings())
-except:
+    model_warnings = list(doc.GetWarnings())
+except Exception:
     pass
 
-if warnings:
-    warn_counter = Counter()
-    for w in warnings:
-        try:
-            desc = str(w.GetDescriptionText())
-            # Trunca descricoes longas para caber na tabela.
-            warn_counter[desc[:80]] += 1
-        except:
-            warn_counter["(erro ao ler descricao)"] += 1
 
-    warn_table = [[desc, str(cnt)] for desc, cnt in warn_counter.most_common(15)]
-    output.print_table(warn_table, columns=["Descricao (top 15)", "Ocorrencias"])
-    output.print_md("_Total de alertas: {}_".format(len(warnings)))
+# ============================================================
+# 1. INFORMACOES DO PROJETO
+# ============================================================
+output.print_md(u"---\n## 1. Informacoes do Projeto")
+
+proj = doc.ProjectInformation
+output.print_table([
+    [u"Nome do Projeto", u8(proj.Name)],
+    [u"Numero",          u8(proj.Number)],
+    [u"Cliente",         u8(proj.ClientName)],
+    [u"Endereco",        u8(proj.Address)],
+    [u"Status",          u8(proj.Status)],
+    [u"Autor",           u8(proj.Author)],
+    [u"Data de Emissao", u8(proj.IssueDate)],
+], columns=[u"Campo", u"Valor"])
+
+
+# ============================================================
+# 2. INVENTARIO DE AMBIENTES
+# ============================================================
+output.print_md(u"---\n## 2. Inventario de Ambientes (Rooms)")
+
+if not all_rooms:
+    output.print_md(u"> **ATENCAO:** Nenhum Room com area encontrado. "
+                    u"Verifique se os ambientes estao fechados e com area calculada.")
 else:
-    output.print_md("_Nenhum alerta encontrado no modelo._")
+    inv_table = []
+    for r in sorted(all_rooms, key=lambda x: -x.Area):
+        area_m2 = sqft_to_sqm(r.Area)
+        link    = output.linkify(r.Id)
+        inv_table.append([rnumber(r), rname(r), u"{} m2".format(area_m2), rlevel(r), link])
+    output.print_table(inv_table, columns=[u"Num.", u"Nome", u"Area", u"Nivel", u"Selecionar"])
+    output.print_md(u"_Total: {} ambientes com area calculada_".format(len(all_rooms)))
 
 
 # ============================================================
-# 6. MODELOS LINKADOS (RevitLinkInstance — NOVO)
+# 3. CHECKLIST DE AMBIENTES OBRIGATORIOS
 # ============================================================
-# Um modelo Revit pode referenciar outros arquivos .rvt via "links".
-# Por exemplo: estrutura + arquitetura + instalacoes como arquivos separados.
-# RevitLinkInstance representa cada instancia de link no modelo hospedeiro.
-output.print_md("---\n## 6. Modelos Linkados (RVT Links)")
+output.print_md(u"---\n## 3. Checklist de Ambientes Obrigatorios")
 
-links = FilteredElementCollector(doc).OfClass(RevitLinkInstance).ToElements()
-
-if links:
-    links_table = []
-    for lk in links:
-        try:
-            lk_type = doc.GetElement(lk.GetTypeId())
-            status  = str(lk_type.GetLinkedFileStatus()) if lk_type else "N/D"
-            name    = u8(lk.Name)
-            links_table.append([name, status, u8(lk.Id.ToString())])
-        except:
-            links_table.append([u8(lk.Name), "Erro", u8(lk.Id.ToString())])
-    output.print_table(links_table, columns=["Nome do Link", "Status", "ID"])
-else:
-    output.print_md("_Nenhum modelo linkado encontrado._")
-
-
-# ============================================================
-# 7. FASES (doc.Phases — NOVO)
-# ============================================================
-# Fases representam etapas cronologicas do projeto: demolicao, nova construcao, etc.
-# Cada elemento do Revit pode ser associado a uma fase de criacao/demolicao.
-output.print_md("---\n## 7. Fases do Projeto")
-
-phases = doc.Phases  # Retorna uma colecao de Phase objects
-phases_table = []
-for i, ph in enumerate(phases):
-    phases_table.append([str(i + 1), u8(ph.Name), u8(ph.Id.ToString())])
-
-output.print_table(phases_table, columns=["Ordem", "Nome", "ID"])
+room_names  = [rname(r) for r in all_rooms]
+check_table = []
+for amb_label, kw_list in AMBIENTES_OBRIGATORIOS:
+    encontrados = [n for n in room_names if match_kw(n, kw_list)]
+    ok  = len(encontrados) > 0
+    qtd = str(len(encontrados))
+    st  = status_icon(ok)
+    register(ok, u"Ambientes Obrigatorios", amb_label,
+             u", ".join(encontrados[:3]) if encontrados else u"Nao encontrado")
+    check_table.append([
+        amb_label,
+        qtd,
+        u", ".join(encontrados[:3]) if encontrados else u"--",
+        st,
+    ])
+output.print_table(check_table,
+    columns=[u"Ambiente Esperado", u"Qtd", u"Encontrado(s)", u"Status"])
 
 
 # ============================================================
-# 8. OPCOES DE PROJETO (DesignOption — NOVO)
+# 4. ACESSIBILIDADE -- NBR 9050
 # ============================================================
-# Design Options permitem modelar variantes de layout no mesmo arquivo.
-# Exemplo: duas opcoes de escada (escada A / escada B) coexistindo no modelo.
-output.print_md("---\n## 8. Opcoes de Projeto (Design Options)")
+output.print_md(u"---\n## 4. Acessibilidade -- NBR 9050")
 
-d_opts = FilteredElementCollector(doc).OfClass(DesignOption).ToElements()
+# 4a. Largura de portas
+output.print_md(u"### 4a. Largura de Portas")
 
-if d_opts:
-    opts_table = [[u8(d.Name), u8(d.Id.ToString())] for d in d_opts]
-    output.print_table(opts_table, columns=["Opcao", "ID"])
-else:
-    output.print_md("_Nenhuma Design Option encontrada._")
+porta_ok_count  = 0
+porta_nok_list  = []
+porta_total     = 0
 
-
-# ============================================================
-# 9. CATEGORIAS DE ELEMENTOS (Counter — ja conhecido, mas com linkify NOVO)
-# ============================================================
-# Esta secao usa output.linkify() — gera um link clicavel no painel HTML
-# que, ao ser clicado, seleciona o elemento no Revit.
-output.print_md("---\n## 9. Top {} Categorias de Elementos".format(TOP_N_CATS))
-
-all_elements = list(
-    FilteredElementCollector(doc).WhereElementIsNotElementType().ToElements()
-)
-
-cats_map = {}  # cat_name -> list de element Ids (para poder usar linkify)
-for el in all_elements:
+for door in all_doors:
     try:
-        if el.Category:
-            cname = el.Category.Name
-            if cname not in cats_map:
-                cats_map[cname] = []
-            cats_map[cname].append(el.Id)
-    except:
+        w_param = door.get_Parameter(BuiltInParameter.DOOR_WIDTH)
+        if w_param is None:
+            typ = doc.GetElement(door.GetTypeId())
+            w_param = typ.get_Parameter(BuiltInParameter.DOOR_WIDTH) if typ else None
+        if w_param is None:
+            continue
+        largura_m = ft_to_m(w_param.AsDouble())
+        room_name = u""
+        try:
+            fr = door.FromRoom
+            if fr:
+                room_name = u8(fr.Name)
+        except Exception:
+            pass
+        ok = largura_m >= PORTA_ACESSIVEL_MIN_M
+        porta_total += 1
+        if ok:
+            porta_ok_count += 1
+        else:
+            porta_nok_list.append([
+                u8(door.Name), room_name,
+                u"{:.3f} m".format(largura_m),
+                u">= {:.2f} m".format(PORTA_ACESSIVEL_MIN_M),
+                status_icon(ok),
+                output.linkify(door.Id),
+            ])
+            register(False, u"Acessibilidade",
+                     u"Porta abaixo da largura minima",
+                     u"{} ({:.3f} m)".format(u8(door.Name), largura_m))
+    except Exception:
         pass
 
-counter    = Counter({k: len(v) for k, v in cats_map.items()})
-cats_table = []
-for cat, qty in counter.most_common(TOP_N_CATS):
-    # output.linkify(element_id) retorna um link HTML que seleciona o
-    # elemento no Revit ao ser clicado no painel de saida.
-    # Aqui usamos o primeiro elemento da categoria para ilustrar linkify.
-    sample_id   = cats_map[cat][0] if cats_map[cat] else None
-    sample_link = output.linkify(sample_id) if sample_id else "—"
-    cats_table.append([u8(cat), str(qty), sample_link])
-
-output.print_table(cats_table, columns=["Categoria", "Quantidade", "Exemplo (clique)"])
-output.print_md("_Total de categorias unicas: {}  |  Total de elementos: {}_".format(
-    len(counter), len(all_elements)
-))
-
-
-# ============================================================
-# 10. CSV — Ranking de categorias (dual-save)
-# ============================================================
-f     = write_bom_csv(out_cats)
-f_lat = write_bom_csv(out_cats_lat)
-w     = csv.writer(f)
-w_lat = csv.writer(f_lat)
-
-HEADER = ["run_stamp", "model", "categoria", "quantidade"]
-w.writerow(HEADER)
-w_lat.writerow(HEADER)
-
-for cat, qty in counter.most_common():
-    # Codifica para UTF-8 bytes pois o CSV e aberto em modo binario
-    row = [u8(run_stamp).encode("utf-8"), u8(model).encode("utf-8"),
-           u8(cat).encode("utf-8"), str(qty)]
-    w.writerow(row)
-    w_lat.writerow(row)
-
-f.close()
-f_lat.close()
-
-
-# ============================================================
-# 11. JSON FINGERPRINT — Relatorio multi-secao (dual-save)
-# ============================================================
-# O "fingerprint" registra o estado do modelo num dado momento.
-# Salvar fingerprints sequenciais permite detectar alteracoes entre versoes.
-
-def normalize_for_json(obj):
-    """
-    Percorre recursivamente um objeto e garante que todas as strings
-    sejam unicode puro — necessario para contornar bug do json do IronPython 2.7
-    que nao consegue serializar byte strings com chars nao-ASCII.
-    """
-    if isinstance(obj, dict):
-        return {normalize_for_json(k): normalize_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [normalize_for_json(v) for v in obj]
-    elif isinstance(obj, unicode):
-        return obj  # ja e unicode, sem tratamento adicional
-    elif isinstance(obj, (str, bytes)):
-        try:
-            return obj.decode("utf-8")
-        except (UnicodeDecodeError, AttributeError):
-            try:
-                return obj.decode("latin-1")
-            except (UnicodeDecodeError, AttributeError):
-                return u""
+if porta_nok_list:
+    output.print_table(porta_nok_list,
+        columns=[u"Tipo de Porta", u"Ambiente", u"Largura", u"Minimo", u"Status", u"Selecionar"])
+    output.print_md(u"> **{}** porta(s) abaixo de {:.2f} m  |  **{}** porta(s) em conformidade".format(
+        len(porta_nok_list), PORTA_ACESSIVEL_MIN_M, porta_ok_count))
+else:
+    if porta_total:
+        output.print_md(u"> Todas as **{}** portas verificadas atendem a largura minima de {:.2f} m.".format(
+            porta_total, PORTA_ACESSIVEL_MIN_M))
     else:
-        return obj
+        output.print_md(u"> _Nenhuma porta com parametro de largura encontrada._")
+
+register(len(porta_nok_list) == 0, u"Acessibilidade",
+         u"Todas as portas >= {:.2f} m".format(PORTA_ACESSIVEL_MIN_M),
+         u"{}/{} em conformidade".format(porta_ok_count, porta_total))
+
+# 4b. Banheiros acessiveis
+output.print_md(u"### 4b. Banheiros Acessiveis")
+
+banheiros  = [r for r in all_rooms if match_kw(rname(r), KW_BANHEIRO)]
+ban_acess  = [r for r in banheiros if match_kw(rname(r), KW_ACESSIVEL)]
+ban_table  = []
+for r in banheiros:
+    area_m2  = sqft_to_sqm(r.Area)
+    eh_acess = match_kw(rname(r), KW_ACESSIVEL)
+    ok_area  = area_m2 >= AREA_MIN_BANHEIRO_M2
+    ban_table.append([
+        rname(r), u"{} m2".format(area_m2),
+        u"Sim" if eh_acess else u"Nao",
+        status_icon(ok_area), output.linkify(r.Id),
+    ])
+    if not ok_area:
+        register(False, u"Acessibilidade",
+                 u"Banheiro abaixo de {:.2f} m2".format(AREA_MIN_BANHEIRO_M2),
+                 u"{} = {:.2f} m2".format(rname(r), area_m2))
+
+if ban_table:
+    output.print_table(ban_table,
+        columns=[u"Nome", u"Area", u"Acessivel", u"Area OK", u"Selecionar"])
+    tem_acessivel = len(ban_acess) > 0
+    register(tem_acessivel, u"Acessibilidade",
+             u"Banheiro acessivel (NBR 9050) presente",
+             u"{} banheiro(s) com 'acessivel' no nome".format(len(ban_acess)))
+    output.print_md(u"> {} banheiro(s) total | {} acessivel(is) identificado(s)".format(
+        len(banheiros), len(ban_acess)))
+else:
+    register(False, u"Acessibilidade", u"Nenhum banheiro encontrado no modelo", u"")
+    output.print_md(u"> _Nenhum banheiro encontrado._")
 
 
-def safe_phases_list(phases_obj):
-    result = []
+# ============================================================
+# 5. AREAS MINIMAS POR TIPO DE AMBIENTE
+# ============================================================
+output.print_md(u"---\n## 5. Areas Minimas por Ambiente")
+
+AREA_REGRAS = [
+    (u"Hall / Espera",      KW_ESPERA,  AREA_MIN_ESPERA_M2),
+    (u"Area de Caixas",     KW_CAIXA,   AREA_MIN_CAIXA_M2),
+    (u"Sala de Gerente",    KW_GERENTE, AREA_MIN_GERENTE_M2),
+    (u"Cofre / Sala-Forte", KW_COFRE,   AREA_MIN_COFRE_M2),
+]
+
+area_table = []
+for label, kws, min_m2 in AREA_REGRAS:
+    ambientes_match = [r for r in all_rooms if match_kw(rname(r), kws)]
+    if not ambientes_match:
+        area_table.append([label, u"--", u"Nao encontrado", u">= {} m2".format(min_m2), u"PENDENTE"])
+        register(False, u"Areas Minimas", label + u" nao encontrado no modelo", u"")
+        continue
+    for r in ambientes_match:
+        area_m2 = sqft_to_sqm(r.Area)
+        ok      = area_m2 >= min_m2
+        area_table.append([label, rname(r), u"{} m2".format(area_m2), u">= {} m2".format(min_m2), status_icon(ok)])
+        if not ok:
+            register(False, u"Areas Minimas", u"{} abaixo do minimo".format(label),
+                     u"{} = {:.2f} m2 (min: {:.2f} m2)".format(rname(r), area_m2, min_m2))
+        else:
+            register(True, u"Areas Minimas", u"{} em conformidade".format(label))
+
+output.print_table(area_table,
+    columns=[u"Tipo Esperado", u"Room", u"Area Real", u"Minimo", u"Status"])
+
+
+# ============================================================
+# 6. PE-DIREITO POR AMBIENTE
+# ============================================================
+output.print_md(u"---\n## 6. Pe-Direito por Ambiente")
+
+pd_table = []
+for r in all_rooms:
     try:
-        for ph in phases_obj:
-            result.append(safe_str(ph.Name))
-    except:
+        h_param = r.get_Parameter(BuiltInParameter.ROOM_HEIGHT)
+        if h_param is None:
+            continue
+        altura_m = ft_to_m(h_param.AsDouble())
+        if altura_m <= 0:
+            continue
+        if match_kw(rname(r), KW_ESPERA + KW_CAIXA):
+            minimo = PE_DIREITO_HALL_MIN_M
+        else:
+            minimo = PE_DIREITO_MIN_M
+        ok = altura_m >= minimo
+        pd_table.append([
+            rname(r), u"{:.3f} m".format(altura_m),
+            u">= {:.2f} m".format(minimo), status_icon(ok), output.linkify(r.Id),
+        ])
+        if not ok:
+            register(False, u"Pe-Direito", u"Pe-direito abaixo do minimo",
+                     u"{}: {:.3f} m (min {:.2f} m)".format(rname(r), altura_m, minimo))
+    except Exception:
         pass
-    return result
 
-fingerprint = {
-    "run_stamp":   run_stamp,
-    "model":       safe_str(model),
+if pd_table:
+    nok_pd = [row for row in pd_table if row[3] == u"ATENCAO"]
+    ok_pd  = [row for row in pd_table if row[3] == u"OK"]
+    if nok_pd:
+        output.print_table(nok_pd,
+            columns=[u"Ambiente", u"Altura", u"Minimo", u"Status", u"Selecionar"])
+    output.print_md(u"> {}/{} ambientes com pe-direito em conformidade".format(
+        len(ok_pd), len(pd_table)))
+    if not nok_pd:
+        output.print_md(u"> Todos os ambientes atendem o pe-direito minimo.")
+else:
+    output.print_md(u"> _Nenhum ambiente com parametro de altura encontrado._")
+
+
+# ============================================================
+# 7. SEGURANCA -- ELEMENTOS CRITICOS
+# ============================================================
+output.print_md(u"---\n## 7. Seguranca -- Elementos Criticos")
+
+seg_table = []
+
+def check_security_zone(label, keywords, required=True):
+    matches = [r for r in all_rooms if match_kw(rname(r), keywords)]
+    ok    = len(matches) > 0
+    qtd   = str(len(matches))
+    nomes = u", ".join(rname(r) for r in matches[:3])
+    st    = status_icon(ok) if required else (u"OK" if ok else u"INFO")
+    if required:
+        register(ok, u"Seguranca", label, nomes if ok else u"Nao encontrado no modelo")
+    seg_table.append([label, qtd, nomes if ok else u"--", st])
+
+check_security_zone(u"Cabine / Cilindro de Seguranca", KW_SEGURANCA, required=True)
+check_security_zone(u"Cofre / Sala-Forte",             KW_COFRE,     required=True)
+check_security_zone(u"Saida de Emergencia / Rota Fuga",KW_SAIDA,     required=True)
+check_security_zone(u"Area de Autoatendimento (ATM)",   KW_ATM,       required=True)
+check_security_zone(u"Sala de TI / Servidores",         KW_TI,        required=False)
+
+output.print_table(seg_table,
+    columns=[u"Elemento de Seguranca", u"Qtd", u"Ambiente(s)", u"Status"])
+
+# Paredes especiais (blindagem / corta-fogo)
+output.print_md(u"### 7a. Paredes Especiais (Blindagem / Seguranca)")
+
+paredes_seg = []
+for w in all_walls:
+    try:
+        nome_tipo = u""
+        typ = doc.GetElement(w.GetTypeId())
+        if typ:
+            nome_tipo = u8(typ.Name)
+        if any(kw in nome_tipo.upper() for kw in
+               [u"BLIND", u"SEGUR", u"CORTA-FOGO", u"CORTA FOGO", u"FIRE", u"REFOR"]):
+            paredes_seg.append([nome_tipo, output.linkify(w.Id)])
+    except Exception:
+        pass
+
+if paredes_seg:
+    output.print_table(paredes_seg, columns=[u"Tipo de Parede", u"Selecionar"])
+    output.print_md(u"_Total: {} parede(s) especial(is) identificada(s)_".format(len(paredes_seg)))
+else:
+    output.print_md(
+        u"> _Nenhuma parede com nomenclatura de blindagem/corta-fogo encontrada. "
+        u"Verifique os tipos de parede do projeto._"
+    )
+
+
+# ============================================================
+# 8. NOMENCLATURA PADRONIZADA
+# ============================================================
+output.print_md(u"---\n## 8. Nomenclatura dos Ambientes")
+
+sem_nome   = [r for r in all_rooms if not rname(r).strip()]
+sem_numero = [r for r in all_rooms if not rnumber(r).strip()]
+duplicados = [name for name, cnt in Counter(rname(r) for r in all_rooms).items() if cnt > 1]
+
+output.print_table([
+    [u"Rooms sem nome",    str(len(sem_nome)),   status_icon(len(sem_nome) == 0)],
+    [u"Rooms sem numero",  str(len(sem_numero)), status_icon(len(sem_numero) == 0)],
+    [u"Nomes duplicados",  str(len(duplicados)), status_icon(len(duplicados) == 0)],
+], columns=[u"Verificacao", u"Qtd", u"Status"])
+
+register(len(sem_nome) == 0,   u"Nomenclatura", u"Rooms sem nome",   str(len(sem_nome)))
+register(len(sem_numero) == 0, u"Nomenclatura", u"Rooms sem numero", str(len(sem_numero)))
+register(len(duplicados) == 0, u"Nomenclatura", u"Nomes duplicados", u", ".join(duplicados[:5]))
+
+if sem_nome:
+    output.print_table([[output.linkify(r.Id), u8(r.Number)] for r in sem_nome[:10]],
+        columns=[u"Selecionar", u"Numero Room"])
+if duplicados:
+    output.print_md(u"**Nomes duplicados:** " + u", ".join(u"`{}`".format(d) for d in duplicados))
+
+
+
+# ============================================================
+# 9. ALERTAS DO MODELO (Warnings Revit)
+# ============================================================
+output.print_md(u"---\n## 9. Alertas do Modelo (Warnings)")
+
+if model_warnings:
+    warn_counter = Counter()
+    for w in model_warnings:
+        try:
+            desc = u8(str(w.GetDescriptionText()))[:100]
+        except Exception:
+            desc = u"(erro ao ler descricao)"
+        warn_counter[desc] += 1
+
+    total_warn = len(model_warnings)
+    output.print_table([
+        [u8(desc), str(cnt), u"{:.1f}%".format(cnt * 100.0 / total_warn)]
+        for desc, cnt in warn_counter.most_common(15)
+    ], columns=[u"Descricao", u"Ocorrencias", u"%"])
+    output.print_md(u"_Total: {} alertas no modelo_".format(total_warn))
+    register(total_warn == 0, u"Alertas", u"Modelo sem warnings", str(total_warn))
+else:
+    output.print_md(u"> Nenhum alerta encontrado no modelo.")
+    register(True, u"Alertas", u"Modelo sem warnings", u"0")
+
+
+# ============================================================
+# 10. PONTUACAO / SCORE GERAL
+# ============================================================
+output.print_md(u"---\n## 10. Score de Conformidade")
+
+score_pct = round(passed_checks * 100.0 / total_checks, 1) if total_checks else 0
+
+if score_pct >= 90:
+    nivel = u"EXCELENTE"
+elif score_pct >= 75:
+    nivel = u"BOM"
+elif score_pct >= 50:
+    nivel = u"REGULAR"
+else:
+    nivel = u"CRITICO"
+
+output.print_table([
+    [u"Verificacoes realizadas", str(total_checks)],
+    [u"Aprovadas",               "{} ({:.1f}%)".format(passed_checks, score_pct)],
+    [u"Pendencias",              str(total_checks - passed_checks)],
+    [u"Nivel de Conformidade",   u"{} -- {}%".format(nivel, score_pct)],
+], columns=[u"Indicador", u"Resultado"])
+
+if pendencias:
+    output.print_md(u"### Pendencias Detectadas")
+    output.print_table([
+        [p["categoria"], p["descricao"], p["detalhe"]]
+        for p in pendencias
+    ], columns=[u"Categoria", u"Pendencia", u"Detalhe"])
+
+
+# ============================================================
+# EXPORTACAO CSV
+# ============================================================
+for path in [
+    os.path.join(RUN_DIR,    "relatorio_validacao.csv"),
+    os.path.join(LATEST_DIR, "relatorio_validacao.csv"),
+]:
+    f = write_bom_csv(path)
+    w = csv.writer(f)
+    w.writerow(csv_row("run_stamp", "model", "categoria", "descricao", "detalhe", "status"))
+    for p in pendencias:
+        w.writerow(csv_row(run_stamp, model,
+                           p["categoria"], p["descricao"], p["detalhe"], p["status"]))
+    f.close()
+
+
+# ============================================================
+# EXPORTACAO JSON
+# ============================================================
+resultado = {
+    "run_stamp": u8(run_stamp),
+    "model":     u8(model),
     "revit_version": {
-        "number": safe_str(str(app.VersionNumber)),
-        "name":   safe_str(str(app.VersionName)),
-        "build":  safe_str(str(app.VersionBuild)),
+        "number": u8(str(app.VersionNumber)),
+        "name":   u8(str(app.VersionName)),
     },
     "project_info": {
-        "name":    safe_str(proj.Name),
-        "number":  safe_str(proj.Number),
-        "client":  safe_str(proj.ClientName),
-        "address": safe_str(proj.Address),
-        "status":  safe_str(proj.Status),
-        "author":  safe_str(proj.Author),
+        "name":    u8(proj.Name),
+        "number":  u8(proj.Number),
+        "client":  u8(proj.ClientName),
+        "address": u8(proj.Address),
     },
-    "stats": {
-        "total_elements":         len(all_elements),
-        "unique_categories":      len(counter),
-        "levels_count":           len(levels),
-        "links_count":            len(list(links)),
-        "phases_count":           len(list(phases)),
-        "warnings_count":         len(warnings),
-        "design_options_count":   len(list(d_opts)),
-        "is_workshared":          bool(doc.IsWorkshared),
-        "worksets_count":         len(worksets_info),
+    "score": {
+        "total_checks": total_checks,
+        "passed":       passed_checks,
+        "failed":       total_checks - passed_checks,
+        "score_pct":    score_pct,
+        "nivel":        nivel,
     },
-    "levels": [
-        {"name": safe_str(lv.Name), "elevation_m": to_meters(lv.Elevation)}
-        for lv in levels
-    ],
-    "phases": safe_phases_list(phases),
-    "top_categories": [
-        {"category": safe_str(cat), "count": qty}
-        for cat, qty in counter.most_common(TOP_N_CATS)
+    "pendencias": normalize_json(pendencias),
+    "inventario": [
+        {
+            "number":  rnumber(r),
+            "name":    rname(r),
+            "area_m2": sqft_to_sqm(r.Area),
+            "level":   rlevel(r),
+        }
+        for r in all_rooms
     ],
 }
-
-for path in [out_fingerprint, out_fp_lat]:
-    try:
-        # Normaliza todo o dict para unicode puro antes de serializar.
-        # Contorna bug do json do IronPython 2.7 com byte strings nao-ASCII.
-        safe_fp = normalize_for_json(fingerprint)
-        json_bytes = json.dumps(safe_fp, indent=2, ensure_ascii=True)
-        if isinstance(json_bytes, unicode):
-            json_bytes = json_bytes.encode("utf-8")
-        with open(path, "wb") as jf:
-            jf.write(json_bytes)
-    except Exception as ex_json:
-        with open(path, "wb") as jf:
-            jf.write(u"{{\"error\": \"{}\"}}".format(str(ex_json)).encode("utf-8"))
+save_json(
+    resultado,
+    os.path.join(RUN_DIR,    "validacao_agencia.json"),
+    os.path.join(LATEST_DIR, "validacao_agencia.json"),
+)
 
 
 # ============================================================
-# OUTPUT FINAL — console padrao (complementar ao painel HTML)
+# RODAPE
 # ============================================================
-print("=" * 55)
-print("  DIAGNOSTICO DO MODELO CONCLUIDO")
-print("=" * 55)
-print("  Modelo  : {}".format(model))
-print("  Revit   : {} ({})".format(app.VersionNumber, app.VersionName))
-print("  Data    : {}".format(day))
-print("  Hora    : {}".format(ts))
-print("")
-print("  [Historico]")
-print("    {}".format(RUN_DIR))
-print("    - categorias.csv")
-print("    - model_fingerprint.json")
-print("")
-print("  [Ultima execucao]")
-print("    {}".format(LATEST_DIR))
-print("")
-print("-" * 55)
-print("  TOTAIS")
-print("-" * 55)
-print("  Elementos       : {}".format(len(all_elements)))
-print("  Categorias      : {}".format(len(counter)))
-print("  Niveis          : {}".format(len(levels)))
-print("  Links RVT       : {}".format(len(list(links))))
-print("  Fases           : {}".format(len(list(phases))))
-print("  Alertas         : {}".format(len(warnings)))
-print("  Design Options  : {}".format(len(list(d_opts))))
-print("  Workshared      : {}".format("Sim" if doc.IsWorkshared else "Nao"))
-print("=" * 55)
+output.print_md(u"---\n## Arquivos Gerados")
+output.print_table([
+    [u"Historico (esta execucao)", u8(RUN_DIR)],
+    [u"Ultima execucao (latest)",  u8(LATEST_DIR)],
+], columns=[u"Destino", u"Caminho"])
+output.print_md(u"> **Arquivos:** `relatorio_validacao.csv` | `validacao_agencia.json`")
+
+
+# ============================================================
+# CONSOLE
+# ============================================================
+print("=" * 65)
+print("  VALIDADOR DE LAYOUT -- AGENCIA BANCARIA")
+print("=" * 65)
+print("  Modelo     : {}".format(model))
+print("  Revit      : {} ({})".format(app.VersionNumber, app.VersionName))
+print("  Score      : {}% -- {}".format(score_pct, nivel))
+print("-" * 65)
+print("  Checks     : {}".format(total_checks))
+print("  Aprovados  : {}".format(passed_checks))
+print("  Pendencias : {}".format(total_checks - passed_checks))
+print("  Rooms      : {}".format(len(all_rooms)))
+print("  Portas     : {}".format(len(all_doors)))
+print("  Alertas    : {}".format(len(model_warnings)))
+print("-" * 65)
+print("  [Historico] {}".format(RUN_DIR))
+print("  [Latest]    {}".format(LATEST_DIR))
+print("=" * 65)
 print("PROCESSO REALIZADO COM SUCESSO")

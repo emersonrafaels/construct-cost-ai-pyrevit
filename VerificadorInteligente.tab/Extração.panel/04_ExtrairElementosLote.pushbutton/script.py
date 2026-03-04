@@ -20,13 +20,6 @@
 # ============================================================
 
 from pyrevit import revit, forms, script, output
-from Autodesk.Revit.DB import (
-    ModelPathUtils,
-    OpenOptions,
-    DetachFromCentralOption,
-    WorksetConfiguration,
-    WorksetConfigurationOption,
-)
 import os, datetime
 
 from extracao_lib import (
@@ -34,6 +27,8 @@ from extracao_lib import (
     extrair_completo,
     extrair_inventario_por_folha,
 )
+from path_utils import BASE_DIR, ROOT_FOLDER_NAME
+from revit_open_utils import DialogSuppressor, open_rvt_detached, close_doc
 
 # Handle da aplicacao Revit (necessario para abrir arquivos)
 app = __revit__.Application          # type: ignore  # noqa
@@ -41,8 +36,6 @@ app = __revit__.Application          # type: ignore  # noqa
 # ============================================================
 # CONFIG
 # ============================================================
-BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "RevitScan"
 
 
 # ============================================================
@@ -121,27 +114,6 @@ if not confirmacao:
 
 
 # ============================================================
-# UTILIDADE: abre um .rvt de forma segura
-# ============================================================
-def abrir_rvt(rvt_path):
-    """
-    Abre um arquivo .rvt desanexado do central com worksets fechados.
-    Retorna o documento aberto ou levanta excecao.
-    """
-    model_path = ModelPathUtils.ConvertUserVisiblePathToModelPath(rvt_path)
-    open_opts  = OpenOptions()
-    open_opts.DetachFromCentralOption = (
-        DetachFromCentralOption.DetachAndPreserveWorksets
-    )
-    try:
-        wsc = WorksetConfiguration(WorksetConfigurationOption.CloseAllWorksets)
-        open_opts.SetOpenWorksetsConfiguration(wsc)
-    except:
-        pass  # Projeto sem worksets -- ok
-    return app.OpenDocumentFile(model_path, open_opts)
-
-
-# ============================================================
 # LOOP PRINCIPAL -- abre, extrai, fecha cada .rvt
 # ============================================================
 now       = datetime.datetime.now()
@@ -161,55 +133,52 @@ out_panel.print_md(
 )
 out_panel.print_md(u"---")
 
-for idx, rvt_path in enumerate(rvt_files, start=1):
-    filename   = os.path.basename(rvt_path)
-    opened_doc = None
-    out_panel.print_md(u"**[{}/{}]** `{}`".format(idx, len(rvt_files), filename))
+with DialogSuppressor(app) as sup:
+    for idx, rvt_path in enumerate(rvt_files, start=1):
+        filename   = os.path.basename(rvt_path)
+        opened_doc = None
+        out_panel.print_md(u"**[{}/{}]** `{}`".format(idx, len(rvt_files), filename))
 
-    try:
-        opened_doc = abrir_rvt(rvt_path)
-        mdl_title  = opened_doc.Title
-        mdl_safe   = (mdl_title
-                      .replace("/",  "_")
-                      .replace("\\", "_")
-                      .replace(":",  "_"))
+        try:
+            opened_doc = open_rvt_detached(app, rvt_path)
+            mdl_title  = opened_doc.Title
+            mdl_safe   = (mdl_title
+                          .replace("/",  "_")
+                          .replace("\\", "_")
+                          .replace(":",  "_"))
 
-        # ── EXTRAIR METADADOS ──────────────────────────────────
-        if modo == "metadados":
-            res = extrair_metadados(
-                opened_doc, mdl_title, mdl_safe, run_stamp, day, ts)
-            resumo = u"{} folha(s) | {} par(es) folha-vista".format(
-                res["n_sheets"], res["total_pairs"])
-            run_dir = res["run_dir"]
+            # ── EXTRAIR METADADOS ──────────────────────────────────
+            if modo == "metadados":
+                res = extrair_metadados(
+                    opened_doc, mdl_title, mdl_safe, run_stamp, day, ts)
+                resumo = u"{} folha(s) | {} par(es) folha-vista".format(
+                    res["n_sheets"], res["total_pairs"])
+                run_dir = res["run_dir"]
 
-        # ── EXTRAIR COMPLETO ───────────────────────────────────
-        elif modo == "completo":
-            res = extrair_completo(
-                opened_doc, mdl_title, mdl_safe, run_stamp, day, ts)
-            resumo = u"{} elemento(s) extraido(s)".format(res["ok"])
-            run_dir = res["run_dir"]
+            # ── EXTRAIR COMPLETO ───────────────────────────────────
+            elif modo == "completo":
+                res = extrair_completo(
+                    opened_doc, mdl_title, mdl_safe, run_stamp, day, ts)
+                resumo = u"{} elemento(s) extraido(s)".format(res["ok"])
+                run_dir = res["run_dir"]
 
-        # ── REALIZAR INVENTARIO (por folha) ───────────────────
-        else:
-            res = extrair_inventario_por_folha(
-                opened_doc, mdl_title, mdl_safe, run_stamp, day, now)
-            resumo = u"{} elemento(s) | {} folha(s)".format(
-                res["total_seen"], res["folhas_com_itens"])
-            run_dir = res["run_dir"]
+            # ── REALIZAR INVENTARIO (por folha) ───────────────────
+            else:
+                res = extrair_inventario_por_folha(
+                    opened_doc, mdl_title, mdl_safe, run_stamp, day, now)
+                resumo = u"{} elemento(s) | {} folha(s)".format(
+                    res["total_seen"], res["folhas_com_itens"])
+                run_dir = res["run_dir"]
 
-        resultados.append((filename, resumo, run_dir))
-        out_panel.print_md(u"  &nbsp;&nbsp;OK  {}".format(resumo))
+            resultados.append((filename, resumo, run_dir))
+            out_panel.print_md(u"  &nbsp;&nbsp;OK  {}".format(resumo))
 
-    except Exception as ex:
-        erros.append((filename, str(ex)))
-        out_panel.print_md(u"  &nbsp;&nbsp;ERRO: {}".format(str(ex)))
+        except Exception as ex:
+            erros.append((filename, str(ex)))
+            out_panel.print_md(u"  &nbsp;&nbsp;ERRO: {}".format(str(ex)))
 
-    finally:
-        if opened_doc is not None:
-            try:
-                opened_doc.Close(False)   # Fecha sem salvar
-            except:
-                pass
+        finally:
+            close_doc(opened_doc)
 
 
 # ============================================================
@@ -232,6 +201,15 @@ out_panel.print_md(
         len(resultados), len(rvt_files), len(erros)
     )
 )
+
+# Exibe log de dialogs/warnings suprimidos, se houver.
+if sup.log:
+    out_panel.print_md(u"### Avisos suprimidos automaticamente ({})".format(len(sup.log)))
+    for msg in sup.log[:50]:   # Limita a 50 linhas para nao poluir
+        out_panel.print_md(u"- `{}`".format(msg))
+    if len(sup.log) > 50:
+        out_panel.print_md(u"- ... e mais {} aviso(s) omitido(s).".format(
+            len(sup.log) - 50))
 
 # ============================================================
 # POPUP DE ENCERRAMENTO

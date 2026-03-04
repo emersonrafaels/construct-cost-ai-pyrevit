@@ -15,6 +15,11 @@ Funções principais:
       → Inventário de equipamentos por folha (Sheet):
         inventario_por_folha.csv, inventario_totais.csv, inventario.json
 
+  extrair_inventario_por_pavimento(doc, model, model_safe, run_stamp, day, now)
+      → Inventário hierárquico Pavimento > Ambiente > Categoria > Família > Tipo:
+        inventario_por_pavimento.csv, inventario_por_pavimento.json
+        Filtro: phase_created == "Construção nova" e phase_demolished == ""
+
 Compatível com Revit 2022-2026  |  IronPython 2 / CPython 3
 """
 
@@ -30,11 +35,19 @@ from Autodesk.Revit.DB import (
 from collections import defaultdict, Counter
 import os, csv, json, sys
 
+from path_utils import (
+    BASE_DIR,
+    ROOT_FOLDER_NAME,
+    u8,
+    safe_str,
+    write_bom_csv,
+    write_json_file,
+    ensure_dirs as make_dirs,
+)
+
 # ============================================================
 # CONFIG GLOBAL
 # ============================================================
-BASE_DIR         = os.path.join(os.path.expanduser("~"), "Desktop")
-ROOT_FOLDER_NAME = "RevitScan"
 MAX_PARAM_LEN    = 500
 
 # Quando True, emite parâmetros do TIPO de cada elemento no JSON completo.
@@ -59,56 +72,6 @@ CATEGORIAS_INCLUIR = set([
     u"Componentes",          u"Detalhes de modelo",
     u"Portas",               u"Janelas",
 ])
-
-# ============================================================
-# UTILITÁRIOS COMUNS — Python 2 / Python 3
-# ============================================================
-try:
-    _unicode = unicode  # IronPython 2
-except NameError:
-    _unicode = str      # CPython 3
-
-
-def u8(x):
-    """Converte qualquer valor para string compatível com csv.writer."""
-    try:
-        if x is None:
-            return ""
-        if sys.version_info[0] >= 3:
-            return str(x)
-        if isinstance(x, _unicode):
-            return x.encode("utf-8")
-        return str(x)
-    except:
-        try:
-            return _unicode(x).encode("utf-8") if sys.version_info[0] < 3 else str(x)
-        except:
-            return ""
-
-
-def safe_str(x):
-    """Retorna a string ou '' se None — evita 'None' literal nos CSVs."""
-    return x if x else ""
-
-
-def write_bom_csv(path):
-    """
-    Abre arquivo CSV com BOM UTF-8 para que o Excel reconheça o encoding.
-    Compatível com IronPython 2 (modo binário) e CPython 3 (encoding param).
-    """
-    if sys.version_info[0] >= 3:
-        f = open(path, "w", encoding="utf-8-sig", newline="")
-    else:
-        f = open(path, "wb")
-        f.write(b"\xef\xbb\xbf")
-    return f
-
-
-def make_dirs(*paths):
-    """Cria todas as pastas fornecidas (equivalente a mkdir -p)."""
-    for p in paths:
-        if not os.path.exists(p):
-            os.makedirs(p)
 
 
 def eid_int(eid):
@@ -224,6 +187,98 @@ def get_phase_names(el):
         return ("", "")
 
 
+def get_room_name(el, doc, param_names=None):
+    """
+    Retorna o nome do ambiente (Room/Space) onde o elemento está.
+    Tenta: el.Room → el.Space → lista de parâmetros.
+
+    param_names : lista de nomes de parâmetro a tentar como fallback.
+                  Se None, carrega ROOM_PARAMETER_NAMES de config_inventario;
+                  se o módulo não existir usa defaults internos.
+    Retorna '' se não encontrado.
+    """
+    # 1) FamilyInstance.Room (luminarias, dispositivos, etc.)
+    try:
+        room = el.Room
+        if room:
+            return safe_str(room.Name)
+    except:
+        pass
+    # 2) FamilyInstance.Space (MEP spaces)
+    try:
+        space = el.Space
+        if space:
+            return safe_str(space.Name)
+    except:
+        pass
+    # 3) Parâmetro de ambiente (fallback)
+    if param_names is None:
+        try:
+            import config_inventario as _ci
+            param_names = _ci.ROOM_PARAMETER_NAMES
+        except Exception:
+            param_names = [
+                u"Compartimento", u"Room Name",
+                u"Nome do Compartimento", u"Room", u"Ambiente",
+            ]
+    for pname in param_names:
+        try:
+            p = el.LookupParameter(pname)
+            if p:
+                val = param_to_str(p, doc)
+                if val:
+                    return val
+        except:
+            pass
+    return u""
+
+
+def get_sap_code(el, doc, param_names=None):
+    """
+    Busca o Código SAP na instância e, se não encontrar, no tipo.
+
+    param_names : lista de nomes de parâmetro a tentar (em ordem).
+                  Se None, carrega SAP_PARAMETER_NAMES de config_inventario;
+                  se o módulo não existir usa defaults internos.
+    Retorna string vazia se ausente.
+    """
+    if param_names is None:
+        try:
+            import config_inventario as _ci
+            param_names = _ci.SAP_PARAMETER_NAMES
+        except Exception:
+            param_names = [
+                u"Codigo SAP", u"Código SAP", u"SAP Code",
+                u"Cod SAP", u"Codigo_SAP", u"Código_SAP",
+            ]
+    # Tentativa na instância
+    for pname in param_names:
+        try:
+            p = el.LookupParameter(pname)
+            if p:
+                val = param_to_str(p, doc)
+                if val:
+                    return val
+        except:
+            pass
+    # Tentativa no tipo
+    try:
+        t = doc.GetElement(el.GetTypeId())
+        if t:
+            for pname in param_names:
+                try:
+                    p = t.LookupParameter(pname)
+                    if p:
+                        val = param_to_str(p, doc)
+                        if val:
+                            return val
+                except:
+                    pass
+    except:
+        pass
+    return u""
+
+
 def get_design_option(el):
     """Retorna o nome da Design Option do elemento, se houver."""
     try:
@@ -314,21 +369,6 @@ def collect_params(el, max_len=MAX_PARAM_LEN, doc=None):
             continue
     return result
 
-
-def write_json_file(path, data):
-    """Serializa dict como JSON com BOM UTF-8. Compatível com Py2/Py3."""
-    json_str = json.dumps(data, ensure_ascii=False, indent=2)
-    if sys.version_info[0] >= 3:
-        with open(path, "w", encoding="utf-8-sig") as fj:
-            fj.write(json_str)
-    else:
-        fj = open(path, "wb")
-        fj.write(b"\xef\xbb\xbf")
-        if isinstance(json_str, _unicode):
-            fj.write(json_str.encode("utf-8"))
-        else:
-            fj.write(json_str)
-        fj.close()
 
 
 # ============================================================
@@ -833,4 +873,387 @@ def extrair_inventario_por_folha(doc, model, model_safe, run_stamp, day, now):
         "total_seen":       total_seen,
         "run_dir":          RUN_DIR,
         "latest_dir":       LATEST_DIR,
+    }
+
+
+# ============================================================
+# FUNÇÃO 4 — INVENTÁRIO POR PAVIMENTO / AMBIENTE
+# ============================================================
+
+def _norm_text(s):
+    """Normaliza texto: strip + colapsa espaços internos."""
+    if not s:
+        return u""
+    return u" ".join(s.split())
+
+
+def extrair_inventario_por_pavimento(
+        doc, model, model_safe, run_stamp, day, now,
+        filtro_fase_criacao=None,
+        filtro_fase_demolicao=False,
+        cfg=None):
+    """
+    Gera inventário hierárquico robusto:
+      Pavimento → Ambiente → Categoria → Família → Tipo
+
+    Parâmetros:
+      filtro_fase_criacao  (str | None)
+          None  → usa cfg.DEFAULT_FASE_CRIACAO (ou desativado)
+          str   → aceita apenas elementos com phase_created == valor
+      filtro_fase_demolicao  (bool)
+          False → usa cfg.DEFAULT_EXCLUIR_DEMOLIDOS (ou desativado)
+          True  → rejeita elementos com phase_demolished != ""
+      cfg   — módulo config_inventario (carregado automaticamente
+              se None; usa defaults internos se ausente)
+
+    Arquivos gerados:
+      inventario_por_pavimento.csv  — linha por Tipo com totais
+      inventario_por_pavimento.json — hierarquia completa
+      conformidade.json             — relatório de qualidade
+
+    Retorna dict:
+      inventario, totais_globais, total_incluido, total_ignorado,
+      conformidade, run_dir, latest_dir
+    """
+
+    # ----------------------------------------------------------
+    # Carrega configuração
+    # ----------------------------------------------------------
+    if cfg is None:
+        try:
+            import config_inventario as cfg
+        except Exception:
+            cfg = None
+
+    def _cfg(attr, default):
+        """Lê atributo do cfg com fallback seguro."""
+        try:
+            return getattr(cfg, attr) if cfg is not None else default
+        except Exception:
+            return default
+
+    # Resolve filtros: parâmetros explícitos têm prioridade sobre config
+    if filtro_fase_criacao is None:
+        filtro_fase_criacao = _cfg("DEFAULT_FASE_CRIACAO", None)
+    if not filtro_fase_demolicao:
+        filtro_fase_demolicao = _cfg("DEFAULT_EXCLUIR_DEMOLIDOS", False)
+
+    ignored_cats_raw   = _cfg("IGNORED_CATEGORIES", [])
+    ignored_cats_lower = set(c.lower() for c in ignored_cats_raw)
+    normalize_text     = _cfg("NORMALIZE_TEXT", True)
+    include_phases_csv = _cfg("INCLUDE_PHASE_COLUMNS_IN_CSV", True)
+    export_flat        = _cfg("EXPORT_FLAT_ITEMS", True)
+    max_amostras       = _cfg("MAX_AMOSTRAS_PROBLEMAS", 200)
+    sap_param_names    = _cfg("SAP_PARAMETER_NAMES", None)
+    room_param_names   = _cfg("ROOM_PARAMETER_NAMES", None)
+
+    def _n(s):
+        return _norm_text(safe_str(s)) if normalize_text else safe_str(s)
+
+    # ----------------------------------------------------------
+    # Diretórios de saída
+    # ----------------------------------------------------------
+    ROOT_DIR   = os.path.join(BASE_DIR, ROOT_FOLDER_NAME)
+    RUN_DIR    = os.path.join(ROOT_DIR, model_safe, "InventarioPorPavimento", run_stamp)
+    LATEST_DIR = os.path.join(ROOT_DIR, model_safe, "latest", "InventarioPorPavimento")
+    make_dirs(RUN_DIR, LATEST_DIR)
+
+    out_csv      = os.path.join(RUN_DIR,    "inventario_por_pavimento.csv")
+    out_json     = os.path.join(RUN_DIR,    "inventario_por_pavimento.json")
+    out_conf     = os.path.join(RUN_DIR,    "conformidade.json")
+    out_csv_lat  = os.path.join(LATEST_DIR, "inventario_por_pavimento.csv")
+    out_json_lat = os.path.join(LATEST_DIR, "inventario_por_pavimento.json")
+    out_conf_lat = os.path.join(LATEST_DIR, "conformidade.json")
+
+    # ----------------------------------------------------------
+    # Estrutura de acumulação:
+    #   inventario[pavimento][ambiente][categoria][familia][tipo]
+    #     = {sap_code, fam_name, count, phase_created, phase_demolished}
+    # ----------------------------------------------------------
+    inventario     = {}
+    totais_globais = Counter()   # (cat, fam, typ) → count
+    flat_items     = []          # lista plana de todos os items
+
+    # Relatório de conformidade
+    total_incluido  = 0
+    total_ignorado  = 0
+    sem_sap         = 0
+    sem_sap_amostras = []
+    sem_ambiente    = 0
+    sem_ambiente_amostras = []
+    sem_pavimento   = 0
+    sem_pavimento_amostras = []
+    cat_sem_sap     = Counter()  # categoria → elementos sem SAP
+    erros_extracao  = 0
+
+    elements = list(FilteredElementCollector(doc).WhereElementIsNotElementType())
+
+    for el in elements:
+        try:
+            # ---- Filtros de fase ----
+            phase_c, phase_d = get_phase_names(el)
+            if filtro_fase_criacao is not None and phase_c != filtro_fase_criacao:
+                total_ignorado += 1
+                continue
+            if filtro_fase_demolicao and phase_d:
+                total_ignorado += 1
+                continue
+
+            # ---- Categoria ----
+            cat_obj = el.Category
+            if not cat_obj:
+                total_ignorado += 1
+                continue
+            cat = _n(cat_obj.Name) or u"(sem categoria)"
+
+            # ---- Filtra categorias ignoradas ----
+            if cat.lower() in ignored_cats_lower:
+                total_ignorado += 1
+                continue
+
+            # ---- Família / Tipo ----
+            fam_raw, typ_raw = get_family_type(el)
+            fam = _n(fam_raw)
+            typ = _n(typ_raw)
+
+            # ---- Localização ----
+            lvl_raw  = get_level_name(el)
+            room_raw = get_room_name(el, doc, param_names=room_param_names)
+            lvl      = _n(lvl_raw)  or u"(sem pavimento)"
+            room     = _n(room_raw) or u"(sem ambiente)"
+
+            # ---- Código SAP ----
+            sap = get_sap_code(el, doc, param_names=sap_param_names)
+
+            # ---- Relatório de conformidade ----
+            el_uid = el.UniqueId
+            if not sap:
+                sem_sap += 1
+                cat_sem_sap[cat] += 1
+                if len(sem_sap_amostras) < max_amostras:
+                    sem_sap_amostras.append({
+                        "uid":      el_uid,
+                        "cat":      cat,
+                        "fam":      fam,
+                        "typ":      typ,
+                        "level":    lvl,
+                        "room":     room,
+                    })
+            if lvl_raw == u"":
+                sem_pavimento += 1
+                if len(sem_pavimento_amostras) < max_amostras:
+                    sem_pavimento_amostras.append(
+                        {"uid": el_uid, "cat": cat, "fam": fam})
+            if room_raw == u"":
+                sem_ambiente += 1
+                if len(sem_ambiente_amostras) < max_amostras:
+                    sem_ambiente_amostras.append(
+                        {"uid": el_uid, "cat": cat, "fam": fam, "level": lvl})
+
+            # ---- Acumular hierarquia ----
+            pavs = inventario.setdefault(lvl, {})
+            ambs = pavs.setdefault(room, {})
+            cats = ambs.setdefault(cat, {})
+            fams = cats.setdefault(fam, {})
+
+            if typ not in fams:
+                fams[typ] = {
+                    "sap_code":        sap or u"",
+                    "fam_name":        fam,
+                    "count":           0,
+                    "phase_created":   _n(phase_c),
+                    "phase_demolished": _n(phase_d),
+                }
+            else:
+                if sap and not fams[typ]["sap_code"]:
+                    fams[typ]["sap_code"] = sap
+
+            fams[typ]["count"] += 1
+            totais_globais[(cat, fam, typ)] += 1
+            total_incluido += 1
+
+            # ---- Flat item ----
+            if export_flat:
+                flat_items.append({
+                    "uid":              el_uid,
+                    "pavimento":        lvl,
+                    "ambiente":         room,
+                    "categoria":        cat,
+                    "familia":          fam,
+                    "tipo":             typ,
+                    "codigo_sap":       sap,
+                    "phase_created":    _n(phase_c),
+                    "phase_demolished": _n(phase_d),
+                })
+
+        except Exception:
+            total_ignorado += 1
+            erros_extracao += 1
+            continue
+
+    # ----------------------------------------------------------
+    # CSV — uma linha por (pavimento, ambiente, categoria, fam, typ)
+    # ----------------------------------------------------------
+    HEADER_BASE = [
+        "model", "run_stamp",
+        "pavimento", "ambiente", "categoria",
+        "familia", "tipo", "codigo_sap", "quantidade",
+    ]
+    HEADER_PHASE = ["phase_created", "phase_demolished"]
+    HEADER = HEADER_BASE + (HEADER_PHASE if include_phases_csv else [])
+
+    def _write_csv(path):
+        f  = write_bom_csv(path)
+        wr = csv.writer(f)
+        wr.writerow(HEADER)
+        for pav in sorted(inventario.keys()):
+            for amb in sorted(inventario[pav].keys()):
+                for cat in sorted(inventario[pav][amb].keys()):
+                    for fam in sorted(inventario[pav][amb][cat].keys()):
+                        for typ, info in sorted(
+                                inventario[pav][amb][cat][fam].items()):
+                            row = [
+                                u8(model),        u8(run_stamp),
+                                u8(pav),          u8(amb),
+                                u8(cat),          u8(fam),
+                                u8(typ),          u8(info["sap_code"]),
+                                u8(info["count"]),
+                            ]
+                            if include_phases_csv:
+                                row += [
+                                    u8(info["phase_created"]),
+                                    u8(info["phase_demolished"]),
+                                ]
+                            wr.writerow(row)
+        f.close()
+
+    _write_csv(out_csv)
+    _write_csv(out_csv_lat)
+
+    # ----------------------------------------------------------
+    # JSON — hierarquia completa + flat_items + conformidade
+    # ----------------------------------------------------------
+    def _serialize_hier():
+        out = {}
+        for pav in sorted(inventario.keys()):
+            pav_node = {
+                "pavimento":  pav,
+                "total":      sum(
+                    info["count"]
+                    for amb in inventario[pav].values()
+                    for cat in amb.values()
+                    for fam in cat.values()
+                    for info in fam.values()),
+                "ambientes":  {},
+            }
+            for amb in sorted(inventario[pav].keys()):
+                amb_node = {
+                    "ambiente":   amb,
+                    "total":      sum(
+                        info["count"]
+                        for cat in inventario[pav][amb].values()
+                        for fam in cat.values()
+                        for info in fam.values()),
+                    "categorias": {},
+                }
+                for cat in sorted(inventario[pav][amb].keys()):
+                    cat_node = {
+                        "categoria": cat,
+                        "total":     sum(
+                            info["count"]
+                            for fam in inventario[pav][amb][cat].values()
+                            for info in fam.values()),
+                        "familias":  {},
+                    }
+                    for fam in sorted(inventario[pav][amb][cat].keys()):
+                        tipos = [
+                            {
+                                "tipo":             typ,
+                                "sap_code":         info["sap_code"],
+                                "sap_ok":           bool(info["sap_code"]),
+                                "quantidade":       info["count"],
+                                "phase_created":    info["phase_created"],
+                                "phase_demolished": info["phase_demolished"],
+                            }
+                            for typ, info in sorted(
+                                inventario[pav][amb][cat][fam].items())
+                        ]
+                        cat_node["familias"][fam] = {
+                            "familia": fam,
+                            "total":   sum(t["quantidade"] for t in tipos),
+                            "tipos":   tipos,
+                        }
+                    amb_node["categorias"][cat] = cat_node
+                pav_node["ambientes"][amb] = amb_node
+            out[pav] = pav_node
+        return out
+
+    # Conformidade
+    pct = lambda n: round(100.0 * n / total_incluido, 2) if total_incluido else 0.0
+    conformidade = {
+        "total_incluido":         total_incluido,
+        "total_ignorado":         total_ignorado,
+        "erros_extracao":         erros_extracao,
+        "sem_codigo_sap": {
+            "count":              sem_sap,
+            "percentual":         pct(sem_sap),
+            "por_categoria":      dict(
+                sorted(cat_sem_sap.items(), key=lambda x: -x[1])),
+            "amostras":           sem_sap_amostras,
+        },
+        "sem_pavimento": {
+            "count":              sem_pavimento,
+            "percentual":         pct(sem_pavimento),
+            "amostras":           sem_pavimento_amostras,
+        },
+        "sem_ambiente": {
+            "count":              sem_ambiente,
+            "percentual":         pct(sem_ambiente),
+            "amostras":           sem_ambiente_amostras,
+        },
+    }
+
+    resultado = {
+        "model":     model,
+        "run_stamp": run_stamp,
+        "config": {
+            "fase_criacao":           filtro_fase_criacao or "(desativado)",
+            "excluir_demolidos":      filtro_fase_demolicao,
+            "categorias_ignoradas":   list(ignored_cats_raw),
+            "normalize_text":         normalize_text,
+            "include_phases_csv":     include_phases_csv,
+            "export_flat_items":      export_flat,
+        },
+        "resumo": {
+            "total_incluido":  total_incluido,
+            "total_ignorado":  total_ignorado,
+            "pavimentos":      len(inventario),
+            "sem_codigo_sap":  sem_sap,
+            "sem_pavimento":   sem_pavimento,
+            "sem_ambiente":    sem_ambiente,
+        },
+        "inventario":    _serialize_hier(),
+        "totais_globais": [
+            {"categoria": cat, "familia": fam, "tipo": typ, "quantidade": cnt}
+            for (cat, fam, typ), cnt in sorted(
+                totais_globais.items(), key=lambda x: -x[1])
+        ],
+        "conformidade":  conformidade,
+    }
+    if export_flat:
+        resultado["flat_items"] = flat_items
+
+    write_json_file(out_json, resultado)
+    write_json_file(out_json_lat, resultado)
+    write_json_file(out_conf, conformidade)
+    write_json_file(out_conf_lat, conformidade)
+
+    return {
+        "inventario":     inventario,
+        "totais_globais": dict(totais_globais),
+        "total_incluido": total_incluido,
+        "total_ignorado": total_ignorado,
+        "conformidade":   conformidade,
+        "run_dir":        RUN_DIR,
+        "latest_dir":     LATEST_DIR,
     }

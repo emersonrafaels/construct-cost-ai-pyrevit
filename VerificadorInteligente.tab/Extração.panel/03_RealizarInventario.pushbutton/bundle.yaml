@@ -1,15 +1,27 @@
 ﻿title: Inventário
 author: Emerson Rafael
 tooltip: |
-  Inventário completo por ambiente para agência bancária.
+  Gera inventário hierárquico completo do modelo:
+    Pavimento → Ambiente → Categoria → Família → Tipo
 
-  Associa cada equipamento ao seu Room/Space e agrupa por:
-  Ambiente → Categoria → Família / Tipo → Quantidade
+  Para cada Tipo coleta:
+  • Código SAP (instância ou tipo — lista de parâmetros configurável)
+  • Nome da família e quantidade de instâncias
+  • Fase de criação e demolição
 
-  Detecta sistemas críticos: CFTV, Controle de Acesso, UPS,
-  SPDA, Sprinkler, Rack TI, Quadros Elétricos, Alarme, Cofre.
+  Configuração centralizada em lib/config_inventario.py:
+  • SAP_PARAMETER_NAMES   — nomes aceitos para o campo SAP
+  • ROOM_PARAMETER_NAMES  — nomes aceitos para o campo Ambiente
+  • IGNORED_CATEGORIES    — categorias excluídas do inventário
+  • DEFAULT_FASE_CRIACAO  — filtro de fase (None = desativado)
+  • DEFAULT_EXCLUIR_DEMOLIDOS — rejeitar demolidos (False = desativado)
+  • NORMALIZE_TEXT        — normaliza espaços e strip nos textos
+  • INCLUDE_PHASE_COLUMNS_IN_CSV — adiciona colunas de fase no CSV
+  • EXPORT_FLAT_ITEMS     — lista plana no JSON (para BI/notebooks)
+  • MAX_AMOSTRAS_PROBLEMAS — limite de amostras no relatório
 
-  Saídas:
-  • inventario_por_ambiente.csv
-  • inventario_totais.csv
-  • inventario.json
+  Saídas (histórico + latest):
+  • inventario_por_pavimento.csv  — dados tabulares com fases
+  • inventario_por_pavimento.json — hierarquia + flat_items + conformidade
+  • conformidade.json             — relatório de qualidade (% sem SAP,
+                                    % sem pavimento, % sem ambiente)
